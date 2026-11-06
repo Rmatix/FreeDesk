@@ -10,6 +10,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/core ./crates/core
 COPY crates/relay ./crates/relay
 
+# Exclude client desktop GUI app from the cloud relay build (speeds up build 10x)
+RUN sed -i '/"crates\/app",/d' Cargo.toml
+
 # Compile only the relay server binary in Release mode
 RUN cargo build --release --bin freedesk-relay
 
@@ -22,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=builder /usr/src/freedesk/target/release/freedesk-relay /usr/local/bin/freedesk-relay
 
-ENV PORT=7070
-EXPOSE 7070
+ENV PORT=10000
+EXPOSE 10000
 
 ENTRYPOINT ["/usr/local/bin/freedesk-relay"]
