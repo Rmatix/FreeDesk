@@ -82,6 +82,14 @@ impl eframe::App for FreeDeskApp {
 
                                 self.mode = AppMode::InSession(SessionViewState::new(target_id));
                             }
+                            ConnectionAction::ReconnectRelay(new_addr) => {
+                                info!("Reconnecting bridge to relay: {}", new_addr);
+                                self.bridge = NetworkBridge::start(
+                                    new_addr,
+                                    self.conn_panel.my_peer_id.clone(),
+                                    self.conn_panel.my_session_pin.clone(),
+                                );
+                            }
                         }
                     }
                 }

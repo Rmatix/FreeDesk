@@ -133,9 +133,12 @@ impl ConnectionPanelState {
         ui.collapsing("⚙️ Configuración de Red / Servidor Relay", |ui| {
             ui.horizontal(|ui| {
                 ui.label("Dirección del Relay:");
-                ui.add(egui::TextEdit::singleline(&mut self.relay_addr).hint_text("127.0.0.1:7070").desired_width(200.0));
+                ui.add(egui::TextEdit::singleline(&mut self.relay_addr).hint_text("ej: freedesk-relay.onrender.com").desired_width(220.0));
+                if ui.button("🔄 Conectar").clicked() {
+                    action = Some(ConnectionAction::ReconnectRelay(self.relay_addr.clone()));
+                }
             });
-            ui.label(RichText::new("ℹ️ Si te conectas con tu amigo por internet o red local, ambos deben apuntar a la misma IP donde esté corriendo el freedesk-relay.exe").small().color(TEXT_MUTED));
+            ui.label(RichText::new("ℹ️ Si usas Render, pon tu URL: ejemplo.onrender.com (se conectara seguro por wss://)").small().color(TEXT_MUTED));
         });
 
         ui.add_space(10.0);
@@ -159,4 +162,5 @@ pub enum ConnectionAction {
         pin: String,
         perms: SessionPermissions,
     },
+    ReconnectRelay(String),
 }

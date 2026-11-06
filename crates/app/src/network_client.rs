@@ -1,17 +1,18 @@
-//! Network bridge connecting egui with the Tokio networking and capture pipelines.
+//! Network bridge connecting egui with the Tokio networking (WebSocket) and capture pipelines.
 
 use freedesk_core::capture::ScreenCapture;
 use freedesk_core::codec::{TileDecoder, TileEncoder};
 use freedesk_core::input::InputSimulator;
 use freedesk_core::protocol::{InputEvent, PeerMessage, RelayMessage};
 use freedesk_core::security::SessionPermissions;
+use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info};
 
 pub enum GuiCommand {
@@ -72,23 +73,39 @@ impl NetworkBridge {
 }
 
 async fn run_network_loop(
-    relay_addr: String,
+    relay_input: String,
     my_peer_id: String,
     cmd_rx: Receiver<GuiCommand>,
     event_tx: Sender<NetworkEvent>,
 ) {
     let clean_my_id = my_peer_id.replace(' ', "");
 
-    info!("Connecting to relay at {}", relay_addr);
-    let stream = match TcpStream::connect(&relay_addr).await {
-        Ok(s) => {
+    // Format proper WebSocket URL (ws:// for local / ip, wss:// for onrender.com)
+    let ws_url = if relay_input.starts_with("ws://") || relay_input.starts_with("wss://") {
+        relay_input
+    } else if relay_input.contains("onrender.com") {
+        format!("wss://{}", relay_input.trim_end_matches('/'))
+    } else {
+        format!("ws://{}", relay_input.trim_end_matches('/'))
+    };
+
+    info!("Connecting to WebSocket relay at {}", ws_url);
+    event_tx
+        .send(NetworkEvent::RelayStatus(format!(
+            "🟡 Conectando a {}",
+            ws_url
+        )))
+        .ok();
+
+    let (ws_stream, _) = match connect_async(&ws_url).await {
+        Ok(res) => {
             event_tx
                 .send(NetworkEvent::RelayStatus(format!(
-                    "🟢 Conectado al Relay ({})",
-                    relay_addr
+                    "🟢 Conectado al Relay Seguro ({})",
+                    ws_url
                 )))
                 .ok();
-            s
+            res
         }
         Err(e) => {
             event_tx
@@ -101,21 +118,16 @@ async fn run_network_loop(
         }
     };
 
-    let (mut read_half, mut write_half) = stream.into_split();
+    let (mut ws_write, mut ws_read) = ws_stream.split();
 
     // 1. Register Host ID with Relay
     let reg_msg = RelayMessage::RegisterHost {
         peer_id: clean_my_id.clone(),
     };
-    let payload = match reg_msg.serialize() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let len_bytes = (payload.len() as u32).to_be_bytes();
-    if write_half.write_all(&len_bytes).await.is_err()
-        || write_half.write_all(&payload).await.is_err()
-    {
-        return;
+    if let Ok(payload) = reg_msg.serialize() {
+        if ws_write.send(Message::Binary(payload.into())).await.is_err() {
+            return;
+        }
     }
 
     // Channel for outbound messages to relay
@@ -125,10 +137,7 @@ async fn run_network_loop(
     tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
             if let Ok(bytes) = msg.serialize() {
-                let len_bytes = (bytes.len() as u32).to_be_bytes();
-                if write_half.write_all(&len_bytes).await.is_err()
-                    || write_half.write_all(&bytes).await.is_err()
-                {
+                if ws_write.send(Message::Binary(bytes.into())).await.is_err() {
                     break;
                 }
             }
@@ -146,16 +155,20 @@ async fn run_network_loop(
 
     tokio::spawn(async move {
         let mut decoder = TileDecoder::new(1920, 1080);
-        let mut len_buf = [0u8; 4];
 
-        while read_half.read_exact(&mut len_buf).await.is_ok() {
-            let len = u32::from_be_bytes(len_buf) as usize;
-            let mut buf = vec![0u8; len];
-            if read_half.read_exact(&mut buf).await.is_err() {
-                break;
-            }
+        while let Some(msg_result) = ws_read.next().await {
+            let ws_msg = match msg_result {
+                Ok(m) => m,
+                Err(_) => break,
+            };
 
-            if let Ok(relay_msg) = RelayMessage::deserialize(&buf) {
+            let payload = match ws_msg {
+                Message::Binary(bytes) => bytes,
+                Message::Close(_) => break,
+                _ => continue,
+            };
+
+            if let Ok(relay_msg) = RelayMessage::deserialize(&payload) {
                 match relay_msg {
                     RelayMessage::HostRegistered { success, .. } => {
                         if success {
@@ -195,7 +208,6 @@ async fn run_network_loop(
                         payload,
                         ..
                     } => {
-                        // De-serialize peer message
                         if let Ok(peer_msg) = PeerMessage::deserialize(&payload) {
                             match peer_msg {
                                 PeerMessage::Video(delta) => {

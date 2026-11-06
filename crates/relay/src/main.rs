@@ -1,15 +1,16 @@
-//! FreeDesk Relay Server.
+//! FreeDesk Relay Server with WebSocket Support for Render and Cloud Deployment.
 //! Zero-Knowledge peer routing, 9-digit peer ID management, and anti-abuse shielding.
 
 use freedesk_core::protocol::RelayMessage;
 use freedesk_core::security::RateLimiter;
+use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
 type Tx = mpsc::UnboundedSender<Vec<u8>>;
@@ -22,12 +23,14 @@ async fn main() -> anyhow::Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "7070".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&bind_addr).await?;
-    info!("🚀 FreeDesk Relay Server running on {}", bind_addr);
+
+    info!("🚀 FreeDesk Relay (WebSocket) running on {}", bind_addr);
     info!("🛡️ Zero-Knowledge architecture: Payloads are End-to-End encrypted between peers.");
+    info!("☁️ Ready for Render Cloud deployment via wss://");
 
     let peers: PeerMap = Arc::new(Mutex::new(HashMap::new()));
-    // Max 10 connection attempts per minute per IP
-    let rate_limiter = RateLimiter::new(10, Duration::from_secs(60));
+    // Max 15 connection attempts per minute per IP
+    let rate_limiter = RateLimiter::new(15, Duration::from_secs(60));
 
     loop {
         let (stream, client_addr) = listener.accept().await?;
@@ -41,47 +44,50 @@ async fn main() -> anyhow::Result<()> {
 
         let peers_clone = peers.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, client_addr, peers_clone).await {
+            if let Err(e) = handle_ws_client(stream, client_addr, peers_clone).await {
                 warn!("Client {} disconnected: {:?}", client_addr, e);
             }
         });
     }
 }
 
-async fn handle_client(
+async fn handle_ws_client(
     stream: TcpStream,
     addr: SocketAddr,
     peers: PeerMap,
 ) -> anyhow::Result<()> {
+    // Upgrade TCP stream to WebSocket
+    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut current_peer_id: Option<String> = None;
-
-    let (mut read_half, mut write_half) = stream.into_split();
 
     // Outbound forwarder task
     let outbound_task = tokio::spawn(async move {
         while let Some(msg_bytes) = rx.recv().await {
-            let len = (msg_bytes.len() as u32).to_be_bytes();
-            if write_half.write_all(&len).await.is_err() {
-                break;
-            }
-            if write_half.write_all(&msg_bytes).await.is_err() {
+            if ws_write.send(Message::Binary(msg_bytes.into())).await.is_err() {
                 break;
             }
         }
     });
 
     // Inbound frame receiver
-    let mut len_buf = [0u8; 4];
-    while read_half.read_exact(&mut len_buf).await.is_ok() {
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > 10 * 1024 * 1024 {
-            // Protect against packet bombing (>10MB packet)
-            anyhow::bail!("Packet length exceeded maximum allowable limit: {} bytes", len);
-        }
+    while let Some(msg_result) = ws_read.next().await {
+        let ws_msg = match msg_result {
+            Ok(m) => m,
+            Err(_) => break,
+        };
 
-        let mut payload = vec![0u8; len];
-        read_half.read_exact(&mut payload).await?;
+        let payload = match ws_msg {
+            Message::Binary(bytes) => bytes,
+            Message::Ping(_) => {
+                tx.send(RelayMessage::Pong.serialize()?).ok();
+                continue;
+            }
+            Message::Close(_) => break,
+            _ => continue,
+        };
 
         let relay_msg = match RelayMessage::deserialize(&payload) {
             Ok(msg) => msg,

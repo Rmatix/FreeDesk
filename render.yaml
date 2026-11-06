@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: freedesk-relay
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
