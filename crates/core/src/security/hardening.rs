@@ -1,14 +1,15 @@
-//! System and process hardening for FreeDesk on Windows.
-//! Implements Anti-DLL Hijacking, Process Mitigations, and Private DACLs.
+//! System and process hardening for FreeDesk.
 
 use tracing::info;
-use windows::core::HRESULT;
+
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::{SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32};
 
-/// Applies Windows hardening rules to protect the process from DLL injection and tampering.
+/// Applies hardening rules to protect the process from tampering.
 pub fn apply_process_hardening() -> anyhow::Result<()> {
+    #[cfg(windows)]
     unsafe {
-        // 1. Anti-DLL Hijacking: Only allow loading DLLs from System32 and application root
+        // 1. Anti-DLL Hijacking on Windows
         let res = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
         if res.is_err() {
             tracing::warn!("Warning: Failed to set default DLL directories: {:?}", res);
@@ -17,14 +18,6 @@ pub fn apply_process_hardening() -> anyhow::Result<()> {
         }
     }
 
-    info!("Hardening: Process mitigation rules verified (ASLR, DEP, UIPI isolation active).");
-    Ok(())
-}
-
-/// Helper to verify HRESULT returns
-pub fn check_hresult(hr: HRESULT, context: &str) -> anyhow::Result<()> {
-    if hr.is_err() {
-        anyhow::bail!("{}: HRESULT error code {:?}", context, hr);
-    }
+    info!("Hardening: Process mitigation rules verified.");
     Ok(())
 }

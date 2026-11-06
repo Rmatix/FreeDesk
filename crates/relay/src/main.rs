@@ -19,8 +19,9 @@ type PeerMap = Arc<Mutex<HashMap<String, Tx>>>;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let bind_addr = "0.0.0.0:7070";
-    let listener = TcpListener::bind(bind_addr).await?;
+    let port = std::env::var("PORT").unwrap_or_else(|_| "7070".to_string());
+    let bind_addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&bind_addr).await?;
     info!("🚀 FreeDesk Relay Server running on {}", bind_addr);
     info!("🛡️ Zero-Knowledge architecture: Payloads are End-to-End encrypted between peers.");
 
