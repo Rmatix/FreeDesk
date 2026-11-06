@@ -1,0 +1,25 @@
+[package]
+name = "freedesk-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+lz4_flex.workspace = true
+zeroize.workspace = true
+aes-gcm.workspace = true
+x25519-dalek.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+windows.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
