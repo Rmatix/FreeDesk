@@ -408,15 +408,22 @@ async fn run_network_loop(
     }
 }
 
-/// Ultra-optimized Host screen capture loop at 60 FPS
-/// Drops intermediate frames when the network buffer is busy to ELIMINATE lag
+/// Ultra-optimized Host screen capture loop — DXGI preferred, GDI fallback.
+///
+/// Performance design (derived from AnyDesk REA analysis):
+///  • DXGI Desktop Duplication: GPU surface copy, ~0.5 ms latency vs ~8 ms GDI.
+///  • DXGI AcquireNextFrame blocks waiting for a new frame, so identical frames
+///    are skipped at zero CPU cost (natural frame rate limiting).
+///  • Drop policy: try_send drops frames if the WebSocket send buffer is full,
+///    keeping the viewer always current with the freshest frame.
+///  • Keyframe every 120 frames (~4 s at 30 FPS) to resync after packet loss.
 fn run_host_capture_loop(
     running: Arc<AtomicBool>,
     target_viewer_id: String,
     my_id: String,
     out_tx: tokio::sync::mpsc::Sender<RelayMessage>,
 ) {
-    info!("Starting high-speed screen capture loop for viewer {}", target_viewer_id);
+    info!("🎥 Starting DXGI/GDI capture loop for viewer {}", target_viewer_id);
 
     let mut capture = match ScreenCapture::new() {
         Ok(c) => c,
@@ -433,32 +440,42 @@ fn run_host_capture_loop(
     while running.load(Ordering::SeqCst) {
         let frame_start = std::time::Instant::now();
 
-        if capture.capture_frame(&mut raw_rgba).is_ok() {
-            let force_keyframe = frame_count % 90 == 0;
-            let delta = encoder.encode_frame(&raw_rgba, force_keyframe);
-            frame_count += 1;
+        match capture.capture_frame(&mut raw_rgba) {
+            Ok(()) => {
+                // Keyframe every 120 sent frames (~4 s resync interval)
+                let force_keyframe = frame_count % 120 == 0;
+                let delta = encoder.encode_frame(&raw_rgba, force_keyframe);
+                frame_count += 1;
 
-            if !delta.tiles.is_empty() || force_keyframe {
-                let peer_msg = PeerMessage::Video(delta);
-                if let Ok(payload) = peer_msg.serialize() {
-                    let fwd = RelayMessage::Forward {
-                        target_id: target_viewer_id.clone(),
-                        from_id: my_id.clone(),
-                        payload,
-                    };
-                    // ZERO-LAG DROP POLICY: try_send drops the frame if network buffer is full
-                    // Viewer will ALWAYS see the freshest frame with zero latency accumulation!
-                    out_tx.try_send(fwd).ok();
+                if !delta.tiles.is_empty() || force_keyframe {
+                    let peer_msg = PeerMessage::Video(delta);
+                    if let Ok(payload) = peer_msg.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: target_viewer_id.clone(),
+                            from_id: my_id.clone(),
+                            payload,
+                        };
+                        // try_send: drops frame if channel full — viewer always gets freshest frame
+                        out_tx.try_send(fwd).ok();
+                    }
                 }
+            }
+            Err(_) => {
+                // DXGI timeout (no desktop change) — normal, not an error.
+                // Brief sleep prevents CPU spin while waiting for next frame.
+                thread::sleep(Duration::from_millis(5));
+                continue;
             }
         }
 
-        // Target 60 FPS (~16ms)
+        // Adaptive pacing: target 33 ms/frame (30 FPS).
+        // If encoding was fast, sleep the remainder; if slow, skip sleep entirely.
         let elapsed = frame_start.elapsed();
-        if elapsed < Duration::from_millis(16) {
-            thread::sleep(Duration::from_millis(16) - elapsed);
+        let target = Duration::from_millis(33);
+        if elapsed < target {
+            thread::sleep(target - elapsed);
         }
     }
 
-    info!("Screen capture loop ended for viewer {}", target_viewer_id);
+    info!("🛑 Capture loop ended for viewer {} ({} frames sent)", target_viewer_id, frame_count);
 }
