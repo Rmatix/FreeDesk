@@ -70,14 +70,13 @@ async fn handle_connection(
     addr: SocketAddr,
     peers: PeerMap,
 ) -> anyhow::Result<()> {
-    // Peek at initial bytes to distinguish Render HTTP health checks (HEAD/GET) from WebSockets
-    let mut peek_buf = [0u8; 512];
+    // Peek at initial bytes to distinguish Render HTTP health checks (HEAD/GET /healthz) from WebSockets
+    let mut peek_buf = [0u8; 4096];
     let peek_len = stream.peek(&mut peek_buf).await?;
     let peek_str = String::from_utf8_lossy(&peek_buf[..peek_len]).to_lowercase();
 
-    // If it's a Render health check (HEAD or GET without "upgrade: websocket")
-    if peek_str.starts_with("head ") || (peek_str.starts_with("get ") && !peek_str.contains("upgrade: websocket")) {
-        // Read and discard request
+    // If it's a Render health check (HEAD or GET without "upgrade")
+    if peek_str.starts_with("head ") || (peek_str.starts_with("get ") && !peek_str.contains("upgrade")) {
         let mut discard = vec![0u8; peek_len];
         let _ = stream.read(&mut discard).await;
 

@@ -118,6 +118,9 @@ impl eframe::App for FreeDeskApp {
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
+    // Install Ring crypto provider for Rustls (required for wss:// connections)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Apply strict OS-level process hardening (Anti-DLL hijacking, ASLR, DEP)
     if let Err(e) = apply_process_hardening() {
         eprintln!("Warning: Failed to apply process hardening: {:?}", e);
