@@ -71,6 +71,17 @@ pub enum PeerMessage {
         accepted: bool,
         message: String,
     },
+    /// In-session chat message between Host and Viewer
+    Chat {
+        sender: String,
+        message: String,
+    },
+    /// Clipboard text synchronization between Host and Viewer
+    ClipboardSync {
+        text: String,
+    },
+    /// Remote Ctrl+Alt+Del injection request
+    SendCtrlAltDel,
     /// Terminate session gracefully
     Disconnect,
 }

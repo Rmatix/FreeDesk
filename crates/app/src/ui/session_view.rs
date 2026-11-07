@@ -23,6 +23,11 @@ pub struct SessionViewState {
     pub is_admin: bool,
     pub is_fullscreen: bool,
     pub safety_code: String,
+    // In-session chat
+    pub chat_messages: Vec<(String, String)>,
+    pub show_chat: bool,
+    pub chat_input: String,
+    pub clipboard_feedback: Option<std::time::Instant>,
     // Dual-cursor state updated from NetworkEvent::CursorUpdate
     pub host_controlling: bool,
     pub friend_ghost_pos: Option<(f32, f32)>, // normalised 0..1
@@ -46,6 +51,10 @@ impl SessionViewState {
             is_admin: false,
             is_fullscreen: false,
             safety_code,
+            chat_messages: Vec::new(),
+            show_chat: false,
+            chat_input: String::new(),
+            clipboard_feedback: None,
             host_controlling: true,
             friend_ghost_pos: None,
         }
@@ -126,6 +135,26 @@ impl SessionViewState {
             if ui.button(fs_label).clicked() {
                 self.is_fullscreen = !self.is_fullscreen;
                 action = Some(SessionAction::ToggleFullscreen);
+            }
+
+            ui.separator();
+
+            // CAD (Ctrl+Alt+Del) button
+            if ui.button(RichText::new("⚡ CAD").small()).on_hover_text("Enviar Ctrl+Alt+Del al equipo remoto").clicked() {
+                action = Some(SessionAction::SendCtrlAltDel);
+            }
+
+            // Clipboard Sync button
+            let clip_text = if self.clipboard_feedback.is_some() { "✓ Copiado" } else { "📋 Portapapeles" };
+            if ui.button(RichText::new(clip_text).small()).on_hover_text("Enviar portapapeles hacia el equipo remoto").clicked() {
+                self.clipboard_feedback = Some(std::time::Instant::now());
+                action = Some(SessionAction::SyncClipboard);
+            }
+
+            // Chat drawer button
+            let chat_label = if self.show_chat { "💬 Chat (Abierto)" } else { "💬 Chat" };
+            if ui.button(RichText::new(chat_label).small()).clicked() {
+                self.show_chat = !self.show_chat;
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -226,6 +255,45 @@ impl SessionViewState {
         // ── Floating Audio Panel overlay ─────────────────────────────────────
         self.floating_audio.show(ctx);
 
+        // ── In-Session Chat Drawer (AnyDesk Style) ────────────────────────────
+        if self.show_chat {
+            egui::Window::new("💬 Chat de Sesión")
+                .anchor(egui::Align2::RIGHT_TOP, [-16.0, 50.0])
+                .resizable(false)
+                .default_size(Vec2::new(280.0, 320.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        if self.chat_messages.is_empty() {
+                            ui.colored_label(TEXT_MUTED, "No hay mensajes aún en esta sesión.");
+                        }
+                        for (sender, msg) in &self.chat_messages {
+                            let is_me = sender == "Tú";
+                            let color = if is_me { Color32::from_rgb(52, 152, 219) } else { Color32::from_rgb(230, 57, 70) };
+                            ui.horizontal(|ui| {
+                                ui.colored_label(color, format!("{}:", sender));
+                                ui.label(msg);
+                            });
+                        }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.chat_input)
+                                .hint_text("Escribe un mensaje...")
+                                .desired_width(190.0),
+                        );
+                        let send_btn = ui.button("Enviar").clicked();
+                        let enter_hit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (send_btn || enter_hit) && !self.chat_input.trim().is_empty() {
+                            let text = self.chat_input.trim().to_string();
+                            self.chat_messages.push(("Tú".to_string(), text.clone()));
+                            self.chat_input.clear();
+                            action = Some(SessionAction::SendChat(text));
+                        }
+                    });
+                });
+        }
+
         (action, input_events)
     }
 }
@@ -283,4 +351,7 @@ pub enum SessionAction {
     Disconnect,
     RequestElevation,
     ToggleFullscreen,
+    SendChat(String),
+    SyncClipboard,
+    SendCtrlAltDel,
 }

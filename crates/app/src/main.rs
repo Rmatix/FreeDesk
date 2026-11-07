@@ -97,6 +97,25 @@ impl eframe::App for FreeDeskApp {
                         }
                     }
                 }
+                NetworkEvent::ChatMessage { sender, message } => {
+                    info!("Received chat message from {}: {}", sender, message);
+                    if let AppMode::Viewing(session) = &mut self.mode {
+                        session.chat_messages.push((sender, message));
+                        session.show_chat = true;
+                    } else if let AppMode::Hosting(session) = &mut self.mode {
+                        session.chat_messages.push((sender, message));
+                        session.show_chat = true;
+                    }
+                }
+                NetworkEvent::ClipboardReceived(text) => {
+                    info!("Received clipboard text: {} bytes", text.len());
+                    ctx.output_mut(|o| o.copied_text = text);
+                    if let AppMode::Viewing(session) = &mut self.mode {
+                        session.clipboard_feedback = Some(std::time::Instant::now());
+                    } else if let AppMode::Hosting(session) = &mut self.mode {
+                        session.clipboard_feedback = Some(std::time::Instant::now());
+                    }
+                }
                 NetworkEvent::PerformanceStats { fps, kbps } => {
                     if let AppMode::Viewing(session) = &mut self.mode {
                         session.fps = fps;
@@ -156,6 +175,9 @@ impl eframe::App for FreeDeskApp {
                 disconnect: bool,
                 request_elevation: bool,
                 toggle_fullscreen: bool,
+                send_chat: Option<String>,
+                sync_clipboard: bool,
+                send_cad: bool,
             },
             HostDisconnect,
         }
@@ -197,6 +219,12 @@ impl eframe::App for FreeDeskApp {
                     let disconnect = matches!(action, Some(SessionAction::Disconnect));
                     let request_elevation = matches!(action, Some(SessionAction::RequestElevation));
                     let toggle_fullscreen = matches!(action, Some(SessionAction::ToggleFullscreen));
+                    let send_chat = match &action {
+                        Some(SessionAction::SendChat(txt)) => Some(txt.clone()),
+                        _ => None,
+                    };
+                    let sync_clipboard = matches!(action, Some(SessionAction::SyncClipboard));
+                    let send_cad = matches!(action, Some(SessionAction::SendCtrlAltDel));
                     UiResult::ViewerInputs {
                         inputs,
                         audio_muted,
@@ -204,6 +232,9 @@ impl eframe::App for FreeDeskApp {
                         disconnect,
                         request_elevation,
                         toggle_fullscreen,
+                        send_chat,
+                        sync_clipboard,
+                        send_cad,
                     }
                 }
 
@@ -243,7 +274,17 @@ impl eframe::App for FreeDeskApp {
                 info!("Requesting local elevation...");
                 freedesk_core::security::request_elevation(None);
             }
-            UiResult::ViewerInputs { inputs, audio_muted, audio_volume, disconnect, request_elevation, toggle_fullscreen } => {
+            UiResult::ViewerInputs {
+                inputs,
+                audio_muted,
+                audio_volume,
+                disconnect,
+                request_elevation,
+                toggle_fullscreen,
+                send_chat,
+                sync_clipboard,
+                send_cad,
+            } => {
                 for evt in inputs {
                     self.bridge.cmd_tx.send(GuiCommand::SendInput(evt)).ok();
                 }
@@ -251,6 +292,16 @@ impl eframe::App for FreeDeskApp {
                     muted: audio_muted,
                     volume: audio_volume,
                 }).ok();
+                if let Some(txt) = send_chat {
+                    self.bridge.cmd_tx.send(GuiCommand::SendChat(txt)).ok();
+                }
+                if sync_clipboard {
+                    // Send text to remote peer
+                    self.bridge.cmd_tx.send(GuiCommand::SendClipboard("Portapapeles sincronizado".to_string())).ok();
+                }
+                if send_cad {
+                    self.bridge.cmd_tx.send(GuiCommand::SendCtrlAltDel).ok();
+                }
                 if request_elevation {
                     self.bridge.cmd_tx.send(GuiCommand::RequestElevation).ok();
                 }

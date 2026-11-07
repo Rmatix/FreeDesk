@@ -38,6 +38,9 @@ pub enum GuiCommand {
         viewer_id: String,
         grant: bool,
     },
+    SendChat(String),
+    SendClipboard(String),
+    SendCtrlAltDel,
     Disconnect,
 }
 
@@ -54,6 +57,11 @@ pub enum NetworkEvent {
         accepted: bool,
         message: String,
     },
+    ChatMessage {
+        sender: String,
+        message: String,
+    },
+    ClipboardReceived(String),
     SessionStarted {
         peer_id: String,
     },
@@ -215,7 +223,7 @@ async fn run_network_loop(
                         if success {
                             event_tx_clone
                                 .send(NetworkEvent::RelayStatus(
-                                    "🟢 Registrado y Listo para Recibir Conexiones".to_string(),
+                                    "● Registrado y Listo para Recibir Conexiones".to_string(),
                                 ))
                                 .ok();
                         }
@@ -233,7 +241,7 @@ async fn run_network_loop(
                                 .ok();
                         } else if let Some(err) = error {
                             event_tx_clone
-                                .send(NetworkEvent::RelayStatus(format!("🔴 Error: {}", err)))
+                                .send(NetworkEvent::RelayStatus(format!("✕ Error: {}", err)))
                                 .ok();
                         }
                     }
@@ -251,7 +259,7 @@ async fn run_network_loop(
                                             .ok();
                                     } else {
                                         event_tx_clone
-                                            .send(NetworkEvent::RelayStatus("🔴 Conexión rechazada por el anfitrión".to_string()))
+                                            .send(NetworkEvent::RelayStatus("✕ Conexión rechazada por el anfitrión".to_string()))
                                             .ok();
                                         event_tx_clone.send(NetworkEvent::SessionEnded).ok();
                                     }
@@ -319,6 +327,23 @@ async fn run_network_loop(
                                         accepted,
                                         message,
                                     }).ok();
+                                }
+                                PeerMessage::Chat { sender, message } => {
+                                    info!("💬 In-session chat from {}: {}", sender, message);
+                                    event_tx_clone.send(NetworkEvent::ChatMessage { sender, message }).ok();
+                                }
+                                PeerMessage::ClipboardSync { text } => {
+                                    info!("📋 Remote clipboard synchronized: {} bytes", text.len());
+                                    event_tx_clone.send(NetworkEvent::ClipboardReceived(text)).ok();
+                                }
+                                PeerMessage::SendCtrlAltDel => {
+                                    info!("⚡ Injecting remote Ctrl+Alt+Del signal");
+                                    sim_clone.handle_event(&InputEvent::KeyDown { vk_code: 0x11 }, &SessionPermissions::full_control()).ok(); // VK_CONTROL
+                                    sim_clone.handle_event(&InputEvent::KeyDown { vk_code: 0x12 }, &SessionPermissions::full_control()).ok(); // VK_MENU (Alt)
+                                    sim_clone.handle_event(&InputEvent::KeyDown { vk_code: 0x2E }, &SessionPermissions::full_control()).ok(); // VK_DELETE
+                                    sim_clone.handle_event(&InputEvent::KeyUp { vk_code: 0x2E }, &SessionPermissions::full_control()).ok();
+                                    sim_clone.handle_event(&InputEvent::KeyUp { vk_code: 0x12 }, &SessionPermissions::full_control()).ok();
+                                    sim_clone.handle_event(&InputEvent::KeyUp { vk_code: 0x11 }, &SessionPermissions::full_control()).ok();
                                 }
                                 PeerMessage::Disconnect => {
                                     is_hosting_flag.store(false, Ordering::SeqCst);
@@ -468,6 +493,48 @@ async fn run_network_loop(
                             payload: p,
                         };
                         let _ = out_tx.send(fwd).await;
+                    }
+                }
+            }
+            GuiCommand::SendChat(text) => {
+                if let Some(target) = &current_target_peer {
+                    let peer_msg = PeerMessage::Chat {
+                        sender: clean_my_id.clone(),
+                        message: text,
+                    };
+                    if let Ok(payload) = peer_msg.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: target.clone(),
+                            from_id: clean_my_id.clone(),
+                            payload,
+                        };
+                        out_tx.try_send(fwd).ok();
+                    }
+                }
+            }
+            GuiCommand::SendClipboard(text) => {
+                if let Some(target) = &current_target_peer {
+                    let peer_msg = PeerMessage::ClipboardSync { text };
+                    if let Ok(payload) = peer_msg.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: target.clone(),
+                            from_id: clean_my_id.clone(),
+                            payload,
+                        };
+                        out_tx.try_send(fwd).ok();
+                    }
+                }
+            }
+            GuiCommand::SendCtrlAltDel => {
+                if let Some(target) = &current_target_peer {
+                    let peer_msg = PeerMessage::SendCtrlAltDel;
+                    if let Ok(payload) = peer_msg.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: target.clone(),
+                            from_id: clean_my_id.clone(),
+                            payload,
+                        };
+                        out_tx.try_send(fwd).ok();
                     }
                 }
             }
