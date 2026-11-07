@@ -58,6 +58,12 @@ pub enum PeerMessage {
     Input(InputEvent),
     /// Remote audio control from Viewer to Host (e.g. from the floating audio panel)
     AudioControl { muted: bool, volume: f32 },
+    /// Cursor synchronization and host mouse priority status
+    CursorSync {
+        host_controlling: bool,
+        ghost_x: Option<f32>,
+        ghost_y: Option<f32>,
+    },
     /// Terminate session gracefully
     Disconnect,
 }

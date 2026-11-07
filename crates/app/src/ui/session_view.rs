@@ -1,6 +1,10 @@
-//! Remote session view rendering the desktop stream and capturing remote input.
+//! Remote session view — renders the desktop stream, captures remote input,
+//! and paints a ghost cursor overlay for the host/viewer dual-cursor system.
 
-use eframe::egui::{self, Color32, ColorImage, PointerButton, Rect, RichText, Sense, TextureHandle, TextureOptions, Ui};
+use eframe::egui::{
+    self, Color32, ColorImage, FontId, Painter, PointerButton, Pos2, Rect, RichText,
+    Sense, Stroke, TextureHandle, TextureOptions, Ui,
+};
 use super::floating_audio::FloatingAudioState;
 use super::theme::{ACCENT_RED, BG_DARK, SUCCESS_GREEN, TEXT_MUTED};
 use freedesk_core::protocol::{InputEvent, MouseButton};
@@ -14,23 +18,28 @@ pub struct SessionViewState {
     pub fps: u32,
     pub latency_ms: u32,
     pub e2e_secure: bool,
+    // Dual-cursor state updated from NetworkEvent::CursorUpdate
+    pub host_controlling: bool,
+    pub friend_ghost_pos: Option<(f32, f32)>, // normalised 0..1
 }
 
 impl SessionViewState {
     pub fn new(target_id: String) -> Self {
         Self {
             target_id,
-            screen_width: 1920,
-            screen_height: 1080,
+            screen_width: 1280,
+            screen_height: 720,
             texture: None,
             floating_audio: FloatingAudioState::default(),
             fps: 60,
-            latency_ms: 14,
+            latency_ms: 0,
             e2e_secure: true,
+            host_controlling: true,
+            friend_ghost_pos: None,
         }
     }
 
-    /// Updates the remote texture from raw RGBA buffer
+    /// Updates the remote texture from raw RGBA buffer.
     pub fn update_frame(&mut self, ctx: &egui::Context, rgba_data: &[u8], width: u32, height: u32) {
         self.screen_width = width;
         self.screen_height = height;
@@ -47,7 +56,7 @@ impl SessionViewState {
         let mut action = None;
         let mut input_events = Vec::new();
 
-        // Top Control Toolbar
+        // ── Top Control Toolbar ──────────────────────────────────────────────
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Conectado a: {}", self.target_id)).strong());
             ui.separator();
@@ -59,18 +68,38 @@ impl SessionViewState {
 
             ui.separator();
 
+            // Cursor status indicator
+            if self.host_controlling {
+                ui.label(
+                    RichText::new("🖱️ Control: [Host]")
+                        .color(Color32::from_rgb(241, 196, 15))
+                        .small(),
+                );
+            } else {
+                ui.label(
+                    RichText::new("🖱️ Control: [Tú]")
+                        .color(Color32::from_rgb(39, 174, 96))
+                        .small(),
+                );
+            }
+
+            ui.separator();
+
             // Toggle floating audio panel
             let audio_btn_text = if self.floating_audio.is_open {
-                "🔊 Ocultar Panel Audio"
+                "🔊 Ocultar Audio"
             } else {
-                "🔊 Mostrar Panel Audio"
+                "🔊 Mostrar Audio"
             };
             if ui.button(audio_btn_text).clicked() {
                 self.floating_audio.is_open = !self.floating_audio.is_open;
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(RichText::new("❌ Desconectar").color(ACCENT_RED).strong()).clicked() {
+                if ui
+                    .button(RichText::new("❌ Desconectar").color(ACCENT_RED).strong())
+                    .clicked()
+                {
                     action = Some(SessionAction::Disconnect);
                 }
             });
@@ -78,41 +107,50 @@ impl SessionViewState {
 
         ui.separator();
 
-        // Screen Viewport Canvas
+        // ── Screen Viewport Canvas ───────────────────────────────────────────
         let available_size = ui.available_size();
         let (rect, response) = ui.allocate_exact_size(available_size, Sense::click_and_drag());
 
-        // Paint background and remote texture
-        ui.painter().rect_filled(rect, 0.0, BG_DARK);
+        let painter = ui.painter_at(rect);
 
+        // Background
+        painter.rect_filled(rect, 0.0, BG_DARK);
+
+        // Remote texture
         if let Some(texture) = &self.texture {
-            ui.painter().image(
+            painter.image(
                 texture.id(),
                 rect,
                 Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
         } else {
-            ui.painter().text(
+            painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "Esperando señal de video del host...",
-                egui::FontId::proportional(18.0),
+                FontId::proportional(18.0),
                 TEXT_MUTED,
             );
         }
 
-        // Input Capture on Viewport
+        // ── Ghost Cursor Overlay ─────────────────────────────────────────────
+        // Show friend's ghost cursor position when host has priority
+        if let Some((gx, gy)) = self.friend_ghost_pos {
+            let cx = rect.left() + gx * rect.width();
+            let cy = rect.top() + gy * rect.height();
+            paint_ghost_cursor(&painter, Pos2::new(cx, cy), "Amigo");
+        }
+
+        // ── Input Capture on Viewport ────────────────────────────────────────
         if let Some(hover_pos) = response.hover_pos() {
             let norm_x = ((hover_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
             let norm_y = ((hover_pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
 
-            // Mouse Move
             if response.hovered() {
                 input_events.push(InputEvent::MouseMove { x: norm_x, y: norm_y });
             }
 
-            // Mouse Clicks
             if response.clicked_by(PointerButton::Primary) {
                 input_events.push(InputEvent::MouseDown { button: MouseButton::Left });
                 input_events.push(InputEvent::MouseUp { button: MouseButton::Left });
@@ -125,12 +163,77 @@ impl SessionViewState {
                 input_events.push(InputEvent::MouseDown { button: MouseButton::Middle });
                 input_events.push(InputEvent::MouseUp { button: MouseButton::Middle });
             }
+
+            // Keyboard passthrough
+            ctx.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Key { key, pressed, .. } = event {
+                        let vk = egui_key_to_vk(*key);
+                        if vk != 0 {
+                            if *pressed {
+                                input_events.push(InputEvent::KeyDown { vk_code: vk });
+                            } else {
+                                input_events.push(InputEvent::KeyUp { vk_code: vk });
+                            }
+                        }
+                    }
+                }
+            });
         }
 
-        // Render the Movable Draggable Floating Audio Panel overlay
+        // ── Floating Audio Panel overlay ─────────────────────────────────────
         self.floating_audio.show(ctx);
 
         (action, input_events)
+    }
+}
+
+/// Paints a distinctive ghost cursor (hollow arrow + label) for the friend.
+fn paint_ghost_cursor(painter: &Painter, pos: Pos2, label: &str) {
+    let ghost_color = Color32::from_rgba_premultiplied(255, 100, 100, 220);
+    let outline = Color32::from_rgba_premultiplied(80, 0, 0, 200);
+
+    // Simple arrow shape via triangles
+    let tip = pos;
+    let size = 16.0_f32;
+    let p1 = Pos2::new(tip.x, tip.y + size);
+    let p2 = Pos2::new(tip.x + size * 0.4, tip.y + size * 0.65);
+
+    // Filled arrow
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, p1, p2],
+        ghost_color,
+        Stroke::new(1.5, outline),
+    ));
+
+    // "Amigo" label beneath the arrow
+    painter.text(
+        Pos2::new(tip.x + 18.0, tip.y + 4.0),
+        egui::Align2::LEFT_TOP,
+        label,
+        FontId::proportional(11.0),
+        Color32::from_rgba_premultiplied(255, 100, 100, 230),
+    );
+}
+
+/// Maps egui Key to Windows Virtual Key code.
+fn egui_key_to_vk(key: egui::Key) -> u16 {
+    use egui::Key::*;
+    match key {
+        A => 0x41, B => 0x42, C => 0x43, D => 0x44, E => 0x45, F => 0x46,
+        G => 0x47, H => 0x48, I => 0x49, J => 0x4A, K => 0x4B, L => 0x4C,
+        M => 0x4D, N => 0x4E, O => 0x4F, P => 0x50, Q => 0x51, R => 0x52,
+        S => 0x53, T => 0x54, U => 0x55, V => 0x56, W => 0x57, X => 0x58,
+        Y => 0x59, Z => 0x5A,
+        Num0 => 0x30, Num1 => 0x31, Num2 => 0x32, Num3 => 0x33, Num4 => 0x34,
+        Num5 => 0x35, Num6 => 0x36, Num7 => 0x37, Num8 => 0x38, Num9 => 0x39,
+        F1 => 0x70, F2 => 0x71, F3 => 0x72, F4 => 0x73, F5 => 0x74, F6 => 0x75,
+        F7 => 0x76, F8 => 0x77, F9 => 0x78, F10 => 0x79, F11 => 0x7A, F12 => 0x7B,
+        Escape => 0x1B, Tab => 0x09, Backspace => 0x08, Enter => 0x0D,
+        Space => 0x20, Delete => 0x2E, Insert => 0x2D,
+        Home => 0x24, End => 0x23, PageUp => 0x21, PageDown => 0x22,
+        ArrowLeft => 0x25, ArrowUp => 0x26, ArrowRight => 0x27, ArrowDown => 0x28,
+        _ => 0,
     }
 }
 

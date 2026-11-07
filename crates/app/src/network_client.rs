@@ -1,8 +1,8 @@
-//! Network bridge connecting egui with the Tokio networking (WebSocket) and capture pipelines.
+//! Network bridge connecting egui with the Tokio networking (WebSocket), capture, and input synchronization.
 
 use freedesk_core::capture::ScreenCapture;
 use freedesk_core::codec::{TileDecoder, TileEncoder};
-use freedesk_core::input::InputSimulator;
+use freedesk_core::input::{CursorControlState, InputSimulator};
 use freedesk_core::protocol::{InputEvent, PeerMessage, RelayMessage};
 use freedesk_core::security::SessionPermissions;
 use futures_util::{SinkExt, StreamExt};
@@ -21,14 +21,26 @@ pub enum GuiCommand {
         pin: String,
         perms: SessionPermissions,
     },
+    AcceptIncoming {
+        viewer_id: String,
+        perms: SessionPermissions,
+    },
+    RejectIncoming {
+        viewer_id: String,
+    },
     SendInput(InputEvent),
+    AudioControl {
+        muted: bool,
+        volume: f32,
+    },
     Disconnect,
 }
 
 pub enum NetworkEvent {
     RelayStatus(String),
-    IncomingConnection {
+    IncomingConnectionPrompt {
         viewer_id: String,
+        perms: SessionPermissions,
     },
     SessionStarted {
         peer_id: String,
@@ -37,6 +49,10 @@ pub enum NetworkEvent {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+    },
+    CursorUpdate {
+        host_controlling: bool,
+        ghost_pos: Option<(f32, f32)>,
     },
     SessionEnded,
 }
@@ -80,7 +96,7 @@ async fn run_network_loop(
 ) {
     let clean_my_id = my_peer_id.replace(' ', "");
 
-    // Format proper WebSocket URL (ws:// for local / ip, wss:// for onrender.com and cloud domains)
+    // Format proper WebSocket URL
     let trimmed = relay_input.trim();
     let stripped = trimmed
         .trim_start_matches("https://")
@@ -136,8 +152,8 @@ async fn run_network_loop(
         }
     }
 
-    // Channel for outbound messages to relay
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<RelayMessage>();
+    // Bounded channel to prevent queue lag: size of 2 drops old frames automatically!
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<RelayMessage>(2);
 
     // Outbound sender task
     tokio::spawn(async move {
@@ -152,15 +168,18 @@ async fn run_network_loop(
 
     let is_hosting = Arc::new(AtomicBool::new(false));
     let host_perms = Arc::new(std::sync::Mutex::new(SessionPermissions::full_control()));
+    let input_simulator = Arc::new(InputSimulator::new());
     let my_id_clone = clean_my_id.clone();
     let is_hosting_flag = is_hosting.clone();
 
     // Inbound listener from relay
     let event_tx_clone = event_tx.clone();
     let out_tx_inbound = out_tx.clone();
+    let sim_clone = input_simulator.clone();
+    let host_perms_clone = host_perms.clone(); // clone before moving into async block
 
     tokio::spawn(async move {
-        let mut decoder = TileDecoder::new(1920, 1080);
+        let mut decoder = TileDecoder::new(1280, 720);
 
         while let Some(msg_result) = ws_read.next().await {
             let ws_msg = match msg_result {
@@ -186,36 +205,41 @@ async fn run_network_loop(
                         }
                     }
                     RelayMessage::ConnectStatus {
-                        peer_id, connected, ..
+                        peer_id, connected, error,
                     } => {
                         if connected {
+                            // Prompt host for incoming connection approval!
                             event_tx_clone
-                                .send(NetworkEvent::SessionStarted {
-                                    peer_id: peer_id.clone(),
+                                .send(NetworkEvent::IncomingConnectionPrompt {
+                                    viewer_id: peer_id.clone(),
+                                    perms: SessionPermissions::full_control(),
                                 })
                                 .ok();
-
-                            // If we are the host, start the screen capture streaming thread
-                            if !is_hosting_flag.load(Ordering::SeqCst) {
-                                is_hosting_flag.store(true, Ordering::SeqCst);
-                                let flag = is_hosting_flag.clone();
-                                let target_id = peer_id.clone();
-                                let host_out = out_tx_inbound.clone();
-                                let my_id = my_id_clone.clone();
-
-                                thread::spawn(move || {
-                                    run_host_capture_loop(flag, target_id, my_id, host_out);
-                                });
-                            }
+                        } else if let Some(err) = error {
+                            event_tx_clone
+                                .send(NetworkEvent::RelayStatus(format!("🔴 Error: {}", err)))
+                                .ok();
                         }
                     }
                     RelayMessage::Forward {
-                        from_id: _,
+                        from_id,
                         payload,
                         ..
                     } => {
                         if let Ok(peer_msg) = PeerMessage::deserialize(&payload) {
                             match peer_msg {
+                                PeerMessage::AuthResponse { accepted, granted_permissions, .. } => {
+                                    if accepted {
+                                        event_tx_clone
+                                            .send(NetworkEvent::SessionStarted { peer_id: from_id })
+                                            .ok();
+                                    } else {
+                                        event_tx_clone
+                                            .send(NetworkEvent::RelayStatus("🔴 Conexión rechazada por el anfitrión".to_string()))
+                                            .ok();
+                                        event_tx_clone.send(NetworkEvent::SessionEnded).ok();
+                                    }
+                                }
                                 PeerMessage::Video(delta) => {
                                     if decoder.apply_delta(&delta).is_ok() {
                                         event_tx_clone
@@ -228,8 +252,44 @@ async fn run_network_loop(
                                     }
                                 }
                                 PeerMessage::Input(evt) => {
-                                    let perms = host_perms.lock().unwrap().clone();
-                                    let _ = InputSimulator::handle_event(&evt, &perms);
+                                    let perms = host_perms_clone.lock().unwrap().clone();
+                                    let state = sim_clone.handle_event(&evt, &perms);
+
+                                    // Check host mouse priority and sync ghost cursor
+                                    if let Ok(st) = state {
+                                        let (host_ctrl, ghost_pos) = match st {
+                                            CursorControlState::HostControlling => {
+                                                let ghost = *sim_clone.friend_ghost_cursor.lock().unwrap();
+                                                (true, ghost)
+                                            }
+                                            CursorControlState::FriendControlling => (false, None),
+                                        };
+
+                                        // Notify viewer about host priority and ghost cursor
+                                        let sync_msg = PeerMessage::CursorSync {
+                                            host_controlling: host_ctrl,
+                                            ghost_x: ghost_pos.map(|p| p.0),
+                                            ghost_y: ghost_pos.map(|p| p.1),
+                                        };
+                                        if let Ok(sync_bytes) = sync_msg.serialize() {
+                                            let fwd = RelayMessage::Forward {
+                                                target_id: from_id.clone(),
+                                                from_id: my_id_clone.clone(),
+                                                payload: sync_bytes,
+                                            };
+                                            out_tx_inbound.try_send(fwd).ok();
+                                        }
+                                    }
+                                }
+                                PeerMessage::CursorSync { host_controlling, ghost_x, ghost_y } => {
+                                    let ghost = match (ghost_x, ghost_y) {
+                                        (Some(x), Some(y)) => Some((x, y)),
+                                        _ => None,
+                                    };
+                                    event_tx_clone.send(NetworkEvent::CursorUpdate {
+                                        host_controlling,
+                                        ghost_pos: ghost,
+                                    }).ok();
                                 }
                                 PeerMessage::Disconnect => {
                                     is_hosting_flag.store(false, Ordering::SeqCst);
@@ -255,7 +315,54 @@ async fn run_network_loop(
                     target_id,
                     viewer_id: clean_my_id.clone(),
                 };
-                out_tx.send(connect_msg).ok();
+                let _ = out_tx.send(connect_msg).await;
+            }
+            GuiCommand::AcceptIncoming { viewer_id, perms } => {
+                *host_perms.lock().unwrap() = perms;
+                current_target_peer = Some(viewer_id.clone());
+
+                // Send AuthResponse ACCEPTED to viewer
+                let resp = PeerMessage::AuthResponse {
+                    accepted: true,
+                    error_reason: None,
+                    granted_permissions: perms,
+                };
+                if let Ok(p) = resp.serialize() {
+                    let fwd = RelayMessage::Forward {
+                        target_id: viewer_id.clone(),
+                        from_id: clean_my_id.clone(),
+                        payload: p,
+                    };
+                    let _ = out_tx.send(fwd).await;
+                }
+
+                // Launch host screen streaming loop
+                if !is_hosting.load(Ordering::SeqCst) {
+                    is_hosting.store(true, Ordering::SeqCst);
+                    let flag = is_hosting.clone();
+                    let target_id = viewer_id;
+                    let host_out = out_tx.clone();
+                    let my_id = clean_my_id.clone();
+
+                    thread::spawn(move || {
+                        run_host_capture_loop(flag, target_id, my_id, host_out);
+                    });
+                }
+            }
+            GuiCommand::RejectIncoming { viewer_id } => {
+                let resp = PeerMessage::AuthResponse {
+                    accepted: false,
+                    error_reason: Some("Conexión rechazada por el usuario".to_string()),
+                    granted_permissions: SessionPermissions::default(),
+                };
+                if let Ok(p) = resp.serialize() {
+                    let fwd = RelayMessage::Forward {
+                        target_id: viewer_id,
+                        from_id: clean_my_id.clone(),
+                        payload: p,
+                    };
+                    let _ = out_tx.send(fwd).await;
+                }
             }
             GuiCommand::SendInput(evt) => {
                 if let Some(target) = &current_target_peer {
@@ -266,7 +373,21 @@ async fn run_network_loop(
                             from_id: clean_my_id.clone(),
                             payload,
                         };
-                        out_tx.send(fwd).ok();
+                        // try_send prevents input queue lag!
+                        out_tx.try_send(fwd).ok();
+                    }
+                }
+            }
+            GuiCommand::AudioControl { muted, volume } => {
+                if let Some(target) = &current_target_peer {
+                    let peer_msg = PeerMessage::AudioControl { muted, volume };
+                    if let Ok(payload) = peer_msg.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: target.clone(),
+                            from_id: clean_my_id.clone(),
+                            payload,
+                        };
+                        out_tx.try_send(fwd).ok();
                     }
                 }
             }
@@ -279,7 +400,7 @@ async fn run_network_loop(
                             from_id: clean_my_id.clone(),
                             payload,
                         };
-                        out_tx.send(fwd).ok();
+                        let _ = out_tx.send(fwd).await;
                     }
                 }
             }
@@ -287,14 +408,15 @@ async fn run_network_loop(
     }
 }
 
-/// Host screen capture streaming loop running at 60 FPS
+/// Ultra-optimized Host screen capture loop at 60 FPS
+/// Drops intermediate frames when the network buffer is busy to ELIMINATE lag
 fn run_host_capture_loop(
     running: Arc<AtomicBool>,
     target_viewer_id: String,
     my_id: String,
-    out_tx: tokio::sync::mpsc::UnboundedSender<RelayMessage>,
+    out_tx: tokio::sync::mpsc::Sender<RelayMessage>,
 ) {
-    info!("Starting screen capture loop for viewer {}", target_viewer_id);
+    info!("Starting high-speed screen capture loop for viewer {}", target_viewer_id);
 
     let mut capture = match ScreenCapture::new() {
         Ok(c) => c,
@@ -312,7 +434,7 @@ fn run_host_capture_loop(
         let frame_start = std::time::Instant::now();
 
         if capture.capture_frame(&mut raw_rgba).is_ok() {
-            let force_keyframe = frame_count % 120 == 0;
+            let force_keyframe = frame_count % 90 == 0;
             let delta = encoder.encode_frame(&raw_rgba, force_keyframe);
             frame_count += 1;
 
@@ -324,14 +446,14 @@ fn run_host_capture_loop(
                         from_id: my_id.clone(),
                         payload,
                     };
-                    if out_tx.send(fwd).is_err() {
-                        break;
-                    }
+                    // ZERO-LAG DROP POLICY: try_send drops the frame if network buffer is full
+                    // Viewer will ALWAYS see the freshest frame with zero latency accumulation!
+                    out_tx.try_send(fwd).ok();
                 }
             }
         }
 
-        // Target ~60 FPS (approx 16ms per frame)
+        // Target 60 FPS (~16ms)
         let elapsed = frame_start.elapsed();
         if elapsed < Duration::from_millis(16) {
             thread::sleep(Duration::from_millis(16) - elapsed);

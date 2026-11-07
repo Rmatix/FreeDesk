@@ -3,7 +3,7 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+    BitBlt, StretchBlt, SetStretchBltMode, COLORONCOLOR, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
     GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     HBITMAP, HDC, SRCCOPY,
 };
@@ -12,6 +12,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_
 pub struct ScreenCapture {
     pub width: u32,
     pub height: u32,
+    pub native_w: u32,
+    pub native_h: u32,
     hdc_screen: HDC,
     hdc_mem: HDC,
     h_bitmap: HBITMAP,
@@ -24,8 +26,16 @@ unsafe impl Send for ScreenCapture {}
 impl ScreenCapture {
     pub fn new() -> anyhow::Result<Self> {
         unsafe {
-            let width = GetSystemMetrics(SM_CXSCREEN) as u32;
-            let height = GetSystemMetrics(SM_CYSCREEN) as u32;
+            // Capture at target resolution for high-speed streaming
+            let native_w = GetSystemMetrics(SM_CXSCREEN) as u32;
+            let native_h = GetSystemMetrics(SM_CYSCREEN) as u32;
+
+            // Target 720p standard streaming resolution (1280x720) or native if smaller for 60+ FPS
+            let (target_w, target_h) = if native_w >= 1920 {
+                (1280, 720)
+            } else {
+                (native_w, native_h)
+            };
 
             let hdc_screen = GetDC(HWND(std::ptr::null_mut()));
             if hdc_screen.0.is_null() {
@@ -33,13 +43,13 @@ impl ScreenCapture {
             }
 
             let hdc_mem = CreateCompatibleDC(hdc_screen);
-            let h_bitmap = CreateCompatibleBitmap(hdc_screen, width as i32, height as i32);
+            let h_bitmap = CreateCompatibleBitmap(hdc_screen, target_w as i32, target_h as i32);
 
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width as i32,
-                    biHeight: -(height as i32), // Top-down DIB
+                    biWidth: target_w as i32,
+                    biHeight: -(target_h as i32), // Top-down DIB
                     biPlanes: 1,
                     biBitCount: 32, // BGRA 32-bit
                     biCompression: BI_RGB.0,
@@ -53,10 +63,13 @@ impl ScreenCapture {
             };
 
             SelectObject(hdc_mem, h_bitmap);
+            let _ = SetStretchBltMode(hdc_mem, COLORONCOLOR);
 
             Ok(Self {
-                width,
-                height,
+                width: target_w,
+                height: target_h,
+                native_w,
+                native_h,
                 hdc_screen,
                 hdc_mem,
                 h_bitmap,
@@ -73,20 +86,36 @@ impl ScreenCapture {
         }
 
         unsafe {
-            let blt_res = BitBlt(
-                self.hdc_mem,
-                0,
-                0,
-                self.width as i32,
-                self.height as i32,
-                self.hdc_screen,
-                0,
-                0,
-                SRCCOPY,
-            );
+            let blt_res = if self.width == self.native_w && self.height == self.native_h {
+                BitBlt(
+                    self.hdc_mem,
+                    0,
+                    0,
+                    self.width as i32,
+                    self.height as i32,
+                    self.hdc_screen,
+                    0,
+                    0,
+                    SRCCOPY,
+                )
+            } else {
+                StretchBlt(
+                    self.hdc_mem,
+                    0,
+                    0,
+                    self.width as i32,
+                    self.height as i32,
+                    self.hdc_screen,
+                    0,
+                    0,
+                    self.native_w as i32,
+                    self.native_h as i32,
+                    SRCCOPY,
+                ).ok()
+            };
 
             if blt_res.is_err() {
-                anyhow::bail!("BitBlt screen capture failed");
+                anyhow::bail!("Screen capture BLT failed");
             }
 
             let lines = GetDIBits(

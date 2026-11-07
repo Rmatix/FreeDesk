@@ -2,4 +2,4 @@
 pub mod simulator;
 
 #[cfg(windows)]
-pub use simulator::InputSimulator;
+pub use simulator::{CursorControlState, InputSimulator};
