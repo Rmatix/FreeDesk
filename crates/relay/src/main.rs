@@ -1,13 +1,14 @@
-//! FreeDesk Relay Server with WebSocket Support for Render and Cloud Deployment.
+//! FreeDesk Relay Server with WebSocket & HTTP Health Check Support for Render.
 //! Zero-Knowledge peer routing, 9-digit peer ID management, and anti-abuse shielding.
 
 use freedesk_core::protocol::RelayMessage;
 use freedesk_core::security::RateLimiter;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -20,42 +21,72 @@ type PeerMap = Arc<Mutex<HashMap<String, Tx>>>;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "7070".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "10000".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&bind_addr).await?;
 
-    info!("🚀 FreeDesk Relay (WebSocket) running on {}", bind_addr);
+    info!("🚀 FreeDesk Relay running on {}", bind_addr);
     info!("🛡️ Zero-Knowledge architecture: Payloads are End-to-End encrypted between peers.");
-    info!("☁️ Ready for Render Cloud deployment via wss://");
+    info!("☁️ Render Health Check (HTTP 200) & WebSocket (wss://) fully active.");
 
     let peers: PeerMap = Arc::new(Mutex::new(HashMap::new()));
-    // Max 15 connection attempts per minute per IP
-    let rate_limiter = RateLimiter::new(15, Duration::from_secs(60));
+    // Max 30 connection attempts per minute per public IP
+    let rate_limiter = RateLimiter::new(30, Duration::from_secs(60));
 
     loop {
         let (stream, client_addr) = listener.accept().await?;
-        let ip_key = client_addr.ip().to_string();
+        let ip = client_addr.ip();
 
-        if !rate_limiter.check_and_record(&ip_key) {
-            warn!("⛔ Rate limit exceeded for IP: {}. Connection dropped.", ip_key);
-            drop(stream);
-            continue;
+        // Whitelist internal Render health check addresses and loopback from rate limiting
+        let is_internal = ip.is_loopback() || match ip {
+            IpAddr::V4(v4) => v4.is_private(),
+            IpAddr::V6(_) => false,
+        };
+
+        if !is_internal {
+            let ip_key = ip.to_string();
+            if !rate_limiter.check_and_record(&ip_key) {
+                warn!("⛔ Rate limit exceeded for IP: {}. Connection dropped.", ip_key);
+                drop(stream);
+                continue;
+            }
         }
 
         let peers_clone = peers.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_ws_client(stream, client_addr, peers_clone).await {
-                warn!("Client {} disconnected: {:?}", client_addr, e);
+            if let Err(e) = handle_connection(stream, client_addr, peers_clone).await {
+                // Log non-healthcheck errors
+                let err_str = format!("{:?}", e);
+                if !err_str.contains("Handshake not finished") && !err_str.contains("Connection reset") {
+                    warn!("Client {} disconnected: {}", client_addr, err_str);
+                }
             }
         });
     }
 }
 
-async fn handle_ws_client(
-    stream: TcpStream,
+async fn handle_connection(
+    mut stream: TcpStream,
     addr: SocketAddr,
     peers: PeerMap,
 ) -> anyhow::Result<()> {
+    // Peek at initial bytes to distinguish Render HTTP health checks (HEAD/GET) from WebSockets
+    let mut peek_buf = [0u8; 512];
+    let peek_len = stream.peek(&mut peek_buf).await?;
+    let peek_str = String::from_utf8_lossy(&peek_buf[..peek_len]).to_lowercase();
+
+    // If it's a Render health check (HEAD or GET without "upgrade: websocket")
+    if peek_str.starts_with("head ") || (peek_str.starts_with("get ") && !peek_str.contains("upgrade: websocket")) {
+        // Read and discard request
+        let mut discard = vec![0u8; peek_len];
+        let _ = stream.read(&mut discard).await;
+
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+        stream.write_all(response).await?;
+        stream.flush().await?;
+        return Ok(());
+    }
+
     // Upgrade TCP stream to WebSocket
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
     let (mut ws_write, mut ws_read) = ws_stream.split();

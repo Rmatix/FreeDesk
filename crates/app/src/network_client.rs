@@ -80,13 +80,19 @@ async fn run_network_loop(
 ) {
     let clean_my_id = my_peer_id.replace(' ', "");
 
-    // Format proper WebSocket URL (ws:// for local / ip, wss:// for onrender.com)
-    let ws_url = if relay_input.starts_with("ws://") || relay_input.starts_with("wss://") {
-        relay_input
-    } else if relay_input.contains("onrender.com") {
-        format!("wss://{}", relay_input.trim_end_matches('/'))
+    // Format proper WebSocket URL (ws:// for local / ip, wss:// for onrender.com and cloud domains)
+    let trimmed = relay_input.trim();
+    let stripped = trimmed
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .trim_end_matches('/');
+
+    let ws_url = if stripped.contains("onrender.com") || stripped.contains(".com") || stripped.contains(".net") || stripped.contains(".org") || stripped.contains(".io") {
+        format!("wss://{}", stripped)
     } else {
-        format!("ws://{}", relay_input.trim_end_matches('/'))
+        format!("ws://{}", stripped)
     };
 
     info!("Connecting to WebSocket relay at {}", ws_url);
