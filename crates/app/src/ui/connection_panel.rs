@@ -1,7 +1,7 @@
 //! Main connection screen (AnyDesk style) for FreeDesk.
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Rounding, Stroke, Ui, Vec2};
-use super::icons::{draw_pc_monitor, draw_remote_desk_icon, draw_shield_icon};
+use super::icons::{draw_freedesk_logo, draw_pc_monitor, draw_remote_desk_icon, draw_shield_icon};
 use super::theme::{
     ACCENT_RED, BG_INPUT, BORDER_CARD, SUCCESS_GREEN,
     TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, WARNING_AMBER,
@@ -92,11 +92,30 @@ impl ConnectionPanelState {
 
         // ── TOP BRAND HEADER BAR ──────────────────────────────────────────────
         ui.horizontal(|ui| {
-            // Stylized FreeDesk Brand Tag
+            // FreeDesk Custom Logo Icon & Title
             ui.horizontal(|ui| {
+                let (logo_rect, _) = ui.allocate_exact_size(Vec2::new(26.0, 26.0), egui::Sense::hover());
+                draw_freedesk_logo(&ui.painter(), logo_rect);
                 ui.heading(RichText::new("FreeDesk").color(ACCENT_RED).strong().size(22.0));
+
+                ui.add_space(8.0);
                 ui.colored_label(TEXT_MUTED, "•");
-                ui.colored_label(SUCCESS_GREEN, RichText::new("60 FPS DXGI").small().strong());
+                ui.add_space(4.0);
+
+                // Animated breathing green status radar
+                let time = ui.input(|i| i.time);
+                let pulse = ((time * 3.0).sin() * 0.5 + 0.5) as f32; // 0..1
+                let (dot_rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), egui::Sense::hover());
+                let dot_center = dot_rect.center();
+                let pulse_radius = 4.0 + pulse * 4.0;
+                let pulse_alpha = ((1.0 - pulse) * 140.0) as u8;
+                ui.painter().circle_filled(
+                    dot_center,
+                    pulse_radius,
+                    Color32::from_rgba_premultiplied(46, 204, 113, pulse_alpha),
+                );
+                ui.painter().circle_filled(dot_center, 4.0, SUCCESS_GREEN);
+                ui.colored_label(SUCCESS_GREEN, RichText::new("En línea (60 FPS DXGI)").strong().size(13.5));
             });
 
             // Right side: Admin Mode Indicator / Button
@@ -106,11 +125,11 @@ impl ConnectionPanelState {
                     ui.group(|ui| {
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 16.0), egui::Sense::hover());
                         draw_shield_icon(&ui.painter(), rect, SUCCESS_GREEN);
-                        ui.colored_label(SUCCESS_GREEN, RichText::new("MODO ADMIN ACTIVO").strong().small());
+                        ui.colored_label(SUCCESS_GREEN, RichText::new("ADMIN ACTIVO").strong().size(13.0));
                     });
                 } else {
                     let admin_btn = egui::Button::new(
-                        RichText::new("🛡 Iniciar como Admin").color(WARNING_AMBER).small().strong(),
+                        RichText::new("🛡 Iniciar como Admin").color(WARNING_AMBER).strong().size(13.0),
                     );
                     if ui.add(admin_btn).on_hover_text("Reinicia FreeDesk con UAC para controlar ventanas de sistema y Task Manager").clicked() {
                         action = Some(ConnectionAction::RequestLocalElevation);

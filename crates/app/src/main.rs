@@ -562,11 +562,14 @@ fn main() -> eframe::Result<()> {
         eprintln!("Warning: Failed to apply process hardening: {:?}", e);
     }
 
+    let app_icon = std::sync::Arc::new(freedesk_app::ui::icons::generate_app_icon());
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("FreeDesk — Remote Desktop")
-            .with_inner_size([960.0, 620.0])
-            .with_min_inner_size([700.0, 500.0]),
+            .with_icon(app_icon)
+            .with_inner_size([980.0, 640.0])
+            .with_min_inner_size([720.0, 520.0]),
         ..Default::default()
     };
 

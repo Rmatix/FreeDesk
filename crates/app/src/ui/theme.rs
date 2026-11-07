@@ -56,24 +56,29 @@ pub fn apply_theme(ctx: &eframe::egui::Context) {
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = eframe::egui::Vec2::new(8.0, 8.0);
-    style.spacing.window_margin = eframe::egui::Margin::same(12.0);
+    style.spacing.item_spacing = eframe::egui::Vec2::new(10.0, 10.0);
+    style.spacing.window_margin = eframe::egui::Margin::same(14.0);
+    style.spacing.button_padding = eframe::egui::Vec2::new(10.0, 6.0);
 
     style.text_styles.insert(
         TextStyle::Heading,
-        FontId::new(20.0, eframe::egui::FontFamily::Proportional),
+        FontId::new(22.0, eframe::egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Body,
-        FontId::new(14.0, eframe::egui::FontFamily::Proportional),
+        FontId::new(15.0, eframe::egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Monospace,
-        FontId::new(13.0, eframe::egui::FontFamily::Monospace),
+        FontId::new(14.0, eframe::egui::FontFamily::Monospace),
     );
     style.text_styles.insert(
         TextStyle::Button,
-        FontId::new(14.0, eframe::egui::FontFamily::Proportional),
+        FontId::new(15.0, eframe::egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Small,
+        FontId::new(13.0, eframe::egui::FontFamily::Proportional),
     );
     ctx.set_style(style);
 }
