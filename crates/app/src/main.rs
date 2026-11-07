@@ -22,8 +22,8 @@ impl FreeDeskApp {
         apply_theme(&cc.egui_ctx);
         let conn_panel = ConnectionPanelState::default();
 
-        // Default to local relay or configurable IP
-        let relay_addr = std::env::var("FREEDESK_RELAY").unwrap_or_else(|_| "127.0.0.1:7070".to_string());
+        // Default to Render cloud relay or configurable env var
+        let relay_addr = std::env::var("FREEDESK_RELAY").unwrap_or_else(|_| "freedesk-relay.onrender.com".to_string());
         let bridge = NetworkBridge::start(
             relay_addr,
             conn_panel.my_peer_id.clone(),

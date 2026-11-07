@@ -30,9 +30,9 @@ impl Default for ConnectionPanelState {
             my_session_pin: pin_str,
             target_peer_id: String::new(),
             target_pin: String::new(),
-            relay_status: "🟡 Conectando al Relay...".to_string(),
+            relay_status: "🟡 Conectando al Relay en la nube...".to_string(),
             is_relay_connected: false,
-            relay_addr: "127.0.0.1:7070".to_string(),
+            relay_addr: "freedesk-relay.onrender.com".to_string(),
             requested_perms: SessionPermissions::full_control(),
         }
     }
@@ -129,17 +129,19 @@ impl ConnectionPanelState {
 
         ui.add_space(15.0);
 
-        // Network / Relay Configuration
-        ui.collapsing("⚙️ Configuración de Red / Servidor Relay", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Dirección del Relay:");
-                ui.add(egui::TextEdit::singleline(&mut self.relay_addr).hint_text("ej: freedesk-relay.onrender.com").desired_width(220.0));
-                if ui.button("🔄 Conectar").clicked() {
-                    action = Some(ConnectionAction::ReconnectRelay(self.relay_addr.clone()));
-                }
+        // Network / Relay Configuration (Expanded by default for clarity)
+        egui::CollapsingHeader::new("⚙️ Servidor Relay de Conexión")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Servidor Relay:");
+                    ui.add(egui::TextEdit::singleline(&mut self.relay_addr).hint_text("freedesk-relay.onrender.com").desired_width(240.0));
+                    if ui.button("🔄 Reconectar al Servidor").clicked() {
+                        action = Some(ConnectionAction::ReconnectRelay(self.relay_addr.clone()));
+                    }
+                });
+                ui.label(RichText::new("Servidor en la nube predeterminado: freedesk-relay.onrender.com (conecta automáticamente al abrir la app)").small().color(TEXT_MUTED));
             });
-            ui.label(RichText::new("ℹ️ Si usas Render, pon tu URL: ejemplo.onrender.com (se conectara seguro por wss://)").small().color(TEXT_MUTED));
-        });
 
         ui.add_space(10.0);
 
@@ -148,7 +150,7 @@ impl ConnectionPanelState {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&self.relay_status).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("FreeDesk v0.1.0 • 60+ FPS • LZ4 • Zero-Knowledge").small().color(TEXT_MUTED));
+                ui.label(RichText::new("FreeDesk v0.2.0 • Render Cloud Active • 60+ FPS • Zero-Knowledge").small().color(TEXT_MUTED));
             });
         });
 
