@@ -38,6 +38,7 @@ pub struct TileEncoder {
     width: u32,
     height: u32,
     prev_tile_hashes: Vec<u64>,
+    tile_coords: Vec<(usize, u16, u16, usize, usize, usize, usize)>,
     /// Rolling count of changed tiles in the last window — drives adaptive keyframes.
     high_change_streak: u32,
 }
@@ -46,10 +47,27 @@ impl TileEncoder {
     pub fn new(width: u32, height: u32) -> Self {
         let tiles_x = (width as usize + TILE_SIZE - 1) / TILE_SIZE;
         let tiles_y = (height as usize + TILE_SIZE - 1) / TILE_SIZE;
+        let w = width as usize;
+        let h = height as usize;
+
+        // Precompute immutable tile coordinates once at creation time
+        let mut tile_coords = Vec::with_capacity(tiles_x * tiles_y);
+        for ty in 0..tiles_y {
+            for tx in 0..tiles_x {
+                let tile_idx = ty * tiles_x + tx;
+                let start_x = tx * TILE_SIZE;
+                let start_y = ty * TILE_SIZE;
+                let tile_w = (w - start_x).min(TILE_SIZE);
+                let tile_h = (h - start_y).min(TILE_SIZE);
+                tile_coords.push((tile_idx, tx as u16, ty as u16, start_x, start_y, tile_w, tile_h));
+            }
+        }
+
         Self {
             width,
             height,
             prev_tile_hashes: vec![0u64; tiles_x * tiles_y],
+            tile_coords,
             high_change_streak: 0,
         }
     }
@@ -57,27 +75,12 @@ impl TileEncoder {
     /// Encodes a full RGBA frame into a DeltaFrame using parallel rayon worker threads.
     /// xxHash3 detection and LZ4 tile compression run concurrently across all CPU cores.
     pub fn encode_frame(&mut self, rgba_data: &[u8], force_keyframe: bool) -> DeltaFrame {
-        let tiles_x = (self.width as usize + TILE_SIZE - 1) / TILE_SIZE;
-        let tiles_y = (self.height as usize + TILE_SIZE - 1) / TILE_SIZE;
         let width = self.width as usize;
 
-        // Generate coordinates for all tiles
-        let mut tile_coords = Vec::with_capacity(tiles_x * tiles_y);
-        for ty in 0..tiles_y {
-            for tx in 0..tiles_x {
-                let tile_idx = ty * tiles_x + tx;
-                let start_x = tx * TILE_SIZE;
-                let start_y = ty * TILE_SIZE;
-                let tile_w = (width - start_x).min(TILE_SIZE);
-                let tile_h = (self.height as usize - start_y).min(TILE_SIZE);
-                tile_coords.push((tile_idx, tx, ty, start_x, start_y, tile_w, tile_h));
-            }
-        }
-
-        // Process all tiles in parallel: extract pixels, xxHash3 diff check, and LZ4 compression
-        let results: Vec<(usize, u64, Option<ChangedTile>)> = tile_coords
-            .into_par_iter()
-            .map(|(tile_idx, tx, ty, start_x, start_y, tile_w, tile_h)| {
+        // Process all tiles in parallel with zero-allocation coordinate reuse
+        let results: Vec<(usize, u64, Option<ChangedTile>)> = self.tile_coords
+            .par_iter()
+            .map(|&(tile_idx, tx, ty, start_x, start_y, tile_w, tile_h)| {
                 let mut tile_buf = Vec::with_capacity(tile_w * tile_h * 4);
                 for row in 0..tile_h {
                     let row_start = ((start_y + row) * width + start_x) * 4;
@@ -91,13 +94,19 @@ impl TileEncoder {
                 let prev_hash = self.prev_tile_hashes[tile_idx];
 
                 if force_keyframe || prev_hash != hash {
+                    // Deferred in-place BGRA → RGBA swap: ONLY executed for tiles that changed!
+                    for px in tile_buf.chunks_exact_mut(4) {
+                        px.swap(0, 2);
+                        px[3] = 255;
+                    }
+
                     let compressed = super::lz4::compress(&tile_buf);
                     (
                         tile_idx,
                         hash,
                         Some(ChangedTile {
-                            tile_x: tx as u16,
-                            tile_y: ty as u16,
+                            tile_x: tx,
+                            tile_y: ty,
                             width: tile_w as u16,
                             height: tile_h as u16,
                             compressed_pixels: compressed,
@@ -119,7 +128,7 @@ impl TileEncoder {
 
         // Adaptive keyframe heuristic: if >50% of tiles changed for 3 frames in a row,
         // the next frame will be a keyframe to resync the decoder cleanly.
-        let total_tiles = (tiles_x * tiles_y).max(1);
+        let total_tiles = self.tile_coords.len().max(1);
         if changed_tiles.len() * 2 > total_tiles {
             self.high_change_streak += 1;
         } else {

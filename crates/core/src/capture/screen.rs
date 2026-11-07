@@ -136,13 +136,20 @@ impl DxgiCapture {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
-            self.dupl.AcquireNextFrame(100, &mut frame_info, &mut desktop_resource)?;
+            // 16 ms timeout (synchronous 60 FPS pacing)
+            self.dupl.AcquireNextFrame(16, &mut frame_info, &mut desktop_resource)?;
+
+            // If desktop was completely static (0 accumulated frames), release immediately
+            if frame_info.AccumulatedFrames == 0 && frame_info.LastPresentTime == 0 {
+                self.dupl.ReleaseFrame()?;
+                return Err(anyhow::anyhow!("No desktop changes"));
+            }
 
             let desktop_res = desktop_resource
                 .ok_or_else(|| anyhow::anyhow!("No desktop resource"))?;
             let desktop_tex: ID3D11Texture2D = desktop_res.cast()?;
 
-            // GPU → staging copy
+            // GPU → staging zero-copy texture blit
             let staging_res: ID3D11Resource = self.staging.cast()?;
             let desktop_res2: ID3D11Resource = desktop_tex.cast()?;
             self.context.CopyResource(&staging_res, &desktop_res2);
@@ -163,19 +170,14 @@ impl DxgiCapture {
             let dst_stride = self.width as usize * 4;
             let src_ptr = mapped.pData as *const u8;
 
+            // Fast contiguous row memcpy (swapping is deferred strictly to changed tiles)
             for row in 0..self.height as usize {
                 let src_row = std::slice::from_raw_parts(
                     src_ptr.add(row * src_stride),
                     dst_stride,
                 );
                 let dst_start = row * dst_stride;
-                let dst_row = &mut output[dst_start..dst_start + dst_stride];
-                dst_row.copy_from_slice(src_row);
-                // BGRA → RGBA swap
-                for px in dst_row.chunks_exact_mut(4) {
-                    px.swap(0, 2);
-                    px[3] = 255;
-                }
+                output[dst_start..dst_start + dst_stride].copy_from_slice(src_row);
             }
 
             self.context.Unmap(&staging_res, 0);
