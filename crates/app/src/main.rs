@@ -155,6 +155,7 @@ impl eframe::App for FreeDeskApp {
                 audio_volume: f32,
                 disconnect: bool,
                 request_elevation: bool,
+                toggle_fullscreen: bool,
             },
             HostDisconnect,
         }
@@ -195,12 +196,14 @@ impl eframe::App for FreeDeskApp {
                     let audio_volume = session.floating_audio.volume;
                     let disconnect = matches!(action, Some(SessionAction::Disconnect));
                     let request_elevation = matches!(action, Some(SessionAction::RequestElevation));
+                    let toggle_fullscreen = matches!(action, Some(SessionAction::ToggleFullscreen));
                     UiResult::ViewerInputs {
                         inputs,
                         audio_muted,
                         audio_volume,
                         disconnect,
                         request_elevation,
+                        toggle_fullscreen,
                     }
                 }
 
@@ -240,7 +243,7 @@ impl eframe::App for FreeDeskApp {
                 info!("Requesting local elevation...");
                 freedesk_core::security::request_elevation(None);
             }
-            UiResult::ViewerInputs { inputs, audio_muted, audio_volume, disconnect, request_elevation } => {
+            UiResult::ViewerInputs { inputs, audio_muted, audio_volume, disconnect, request_elevation, toggle_fullscreen } => {
                 for evt in inputs {
                     self.bridge.cmd_tx.send(GuiCommand::SendInput(evt)).ok();
                 }
@@ -251,12 +254,19 @@ impl eframe::App for FreeDeskApp {
                 if request_elevation {
                     self.bridge.cmd_tx.send(GuiCommand::RequestElevation).ok();
                 }
+                if toggle_fullscreen {
+                    if let AppMode::Viewing(session) = &self.mode {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(session.is_fullscreen));
+                    }
+                }
                 if disconnect {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     self.bridge.cmd_tx.send(GuiCommand::Disconnect).ok();
                     self.mode = AppMode::Home;
                 }
             }
             UiResult::HostDisconnect => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                 self.bridge.cmd_tx.send(GuiCommand::Disconnect).ok();
                 self.mode = AppMode::Home;
             }

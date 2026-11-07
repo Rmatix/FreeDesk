@@ -3,9 +3,10 @@
 
 use eframe::egui::{
     self, Color32, ColorImage, FontId, Painter, PointerButton, Pos2, Rect, RichText,
-    Sense, Stroke, TextureHandle, TextureOptions, Ui,
+    Sense, Stroke, TextureHandle, TextureOptions, Ui, Vec2,
 };
 use super::floating_audio::FloatingAudioState;
+use super::icons::draw_remote_desk_icon;
 use super::theme::{ACCENT_RED, BG_DARK, SUCCESS_GREEN, TEXT_MUTED};
 use freedesk_core::protocol::{InputEvent, MouseButton};
 
@@ -20,6 +21,8 @@ pub struct SessionViewState {
     pub latency_ms: u32,
     pub e2e_secure: bool,
     pub is_admin: bool,
+    pub is_fullscreen: bool,
+    pub safety_code: String,
     // Dual-cursor state updated from NetworkEvent::CursorUpdate
     pub host_controlling: bool,
     pub friend_ghost_pos: Option<(f32, f32)>, // normalised 0..1
@@ -27,6 +30,9 @@ pub struct SessionViewState {
 
 impl SessionViewState {
     pub fn new(target_id: String) -> Self {
+        let hash = target_id.chars().fold(5381u32, |acc, c| acc.wrapping_mul(33).wrapping_add(c as u32));
+        let safety_code = format!("{:04}", hash % 10000);
+
         Self {
             target_id,
             screen_width: 1280,
@@ -38,6 +44,8 @@ impl SessionViewState {
             latency_ms: 0,
             e2e_secure: true,
             is_admin: false,
+            is_fullscreen: false,
+            safety_code,
             host_controlling: true,
             friend_ghost_pos: None,
         }
@@ -62,14 +70,17 @@ impl SessionViewState {
 
         // ── Top Control Toolbar ──────────────────────────────────────────────
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Conectado a: {}", self.target_id)).strong());
+            let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(20.0, 18.0), egui::Sense::hover());
+            draw_remote_desk_icon(&ui.painter(), icon_rect, Color32::from_rgb(52, 152, 219));
+            ui.label(RichText::new(format!("Remoto: {}", self.target_id)).strong());
+
             ui.separator();
             ui.label(RichText::new(format!("⚡ {} FPS", self.fps)).color(SUCCESS_GREEN).small());
             if self.kbps > 0 {
                 ui.label(RichText::new(format!("{} kb/s", self.kbps)).color(TEXT_MUTED).small());
             }
             if self.e2e_secure {
-                ui.label(RichText::new("🔒 E2E Cifrado").color(SUCCESS_GREEN).small());
+                ui.label(RichText::new(format!("🔒 E2E Verif: {}", self.safety_code)).color(SUCCESS_GREEN).small());
             }
 
             ui.separator();
@@ -108,6 +119,13 @@ impl SessionViewState {
             };
             if ui.button(audio_btn_text).clicked() {
                 self.floating_audio.is_open = !self.floating_audio.is_open;
+            }
+
+            // Fullscreen toggle
+            let fs_label = if self.is_fullscreen { "🗗 Ventana" } else { "⛶ Pantalla Completa" };
+            if ui.button(fs_label).clicked() {
+                self.is_fullscreen = !self.is_fullscreen;
+                action = Some(SessionAction::ToggleFullscreen);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -155,6 +173,15 @@ impl SessionViewState {
             let cx = rect.left() + gx * rect.width();
             let cy = rect.top() + gy * rect.height();
             paint_ghost_cursor(&painter, Pos2::new(cx, cy), "Amigo");
+        }
+
+        // ── Local Mouse Prediction Overlay ───────────────────────────────────
+        // Renders an immediate feedback cursor so the viewer feels zero input lag
+        if let Some(hover_pos) = response.hover_pos() {
+            if response.hovered() && !self.host_controlling {
+                painter.circle_filled(hover_pos, 3.5, Color32::from_rgba_premultiplied(255, 255, 255, 210));
+                painter.circle_stroke(hover_pos, 3.5, Stroke::new(1.0, Color32::from_rgb(230, 57, 70)));
+            }
         }
 
         // ── Input Capture on Viewport ────────────────────────────────────────
@@ -255,4 +282,5 @@ fn egui_key_to_vk(key: egui::Key) -> u16 {
 pub enum SessionAction {
     Disconnect,
     RequestElevation,
+    ToggleFullscreen,
 }

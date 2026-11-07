@@ -1,5 +1,6 @@
 pub mod connection_panel;
 pub mod floating_audio;
+pub mod icons;
 pub mod session_view;
 pub mod theme;
 

@@ -1,8 +1,18 @@
 //! Main connection screen (AnyDesk style) for FreeDesk.
 
-use eframe::egui::{self, Color32, RichText, Ui, Vec2};
-use super::theme::{ACCENT_RED, SUCCESS_GREEN, TEXT_MUTED, TEXT_PRIMARY};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Rounding, Stroke, Ui, Vec2};
+use super::icons::{draw_pc_monitor, draw_remote_desk_icon, draw_shield_icon};
+use super::theme::{
+    ACCENT_RED, BG_INPUT, BORDER_CARD, SUCCESS_GREEN,
+    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, WARNING_AMBER,
+};
 use freedesk_core::security::SessionPermissions;
+
+#[derive(Clone, Debug)]
+pub struct RecentSession {
+    pub peer_id: String,
+    pub alias: String,
+}
 
 pub struct ConnectionPanelState {
     pub my_peer_id: String,
@@ -16,6 +26,7 @@ pub struct ConnectionPanelState {
     pub is_admin: bool,
     pub copied_recently: bool,
     pub copied_timer: Option<std::time::Instant>,
+    pub recent_sessions: Vec<RecentSession>,
 }
 
 impl Default for ConnectionPanelState {
@@ -33,13 +44,14 @@ impl Default for ConnectionPanelState {
             my_session_pin: pin_str,
             target_peer_id: String::new(),
             target_pin: String::new(),
-            relay_status: "● Conectando al Relay en la nube...".to_string(),
+            relay_status: "● Conectando al Servidor Relay en la nube...".to_string(),
             is_relay_connected: false,
             relay_addr: "freedesk-relay.onrender.com".to_string(),
             requested_perms: SessionPermissions::full_control(),
             is_admin: false,
             copied_recently: false,
             copied_timer: None,
+            recent_sessions: Vec::new(),
         }
     }
 }
@@ -48,6 +60,19 @@ impl ConnectionPanelState {
     pub fn refresh_pin(&mut self) {
         let pin_num: u32 = 100_000 + (rand::random::<u32>() % 900_000);
         self.my_session_pin = format!("{}", pin_num);
+    }
+
+    pub fn record_recent_connection(&mut self, peer_id: &str) {
+        let clean = peer_id.replace(' ', "");
+        if !clean.is_empty() && !self.recent_sessions.iter().any(|s| s.peer_id == clean) {
+            self.recent_sessions.insert(0, RecentSession {
+                peer_id: clean.clone(),
+                alias: format!("Equipo {}", &clean),
+            });
+            if self.recent_sessions.len() > 4 {
+                self.recent_sessions.truncate(4);
+            }
+        }
     }
 
     pub fn render(&mut self, ui: &mut Ui) -> Option<ConnectionAction> {
@@ -63,100 +88,160 @@ impl ConnectionPanelState {
             }
         }
 
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
-        // Header Title & Admin Indicator
+        // ── TOP BRAND HEADER BAR ──────────────────────────────────────────────
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("FreeDesk").color(ACCENT_RED).strong().size(22.0));
-            ui.label(RichText::new("— Escritorio Remoto de Ultra-Rendimiento (60 FPS)").color(TEXT_MUTED));
+            // Stylized FreeDesk Brand Tag
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("FreeDesk").color(ACCENT_RED).strong().size(22.0));
+                ui.colored_label(TEXT_MUTED, "•");
+                ui.colored_label(SUCCESS_GREEN, RichText::new("60 FPS DXGI").small().strong());
+            });
 
+            // Right side: Admin Mode Indicator / Button
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.is_admin {
-                    ui.label(RichText::new("🛡 ADMIN ACTIVADO").color(SUCCESS_GREEN).strong().small());
-                } else if ui.button(RichText::new("🛡 Modo Administrador").color(Color32::from_rgb(241, 196, 15)).small()).clicked() {
-                    action = Some(ConnectionAction::RequestLocalElevation);
+                    // Admin active badge
+                    ui.group(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 16.0), egui::Sense::hover());
+                        draw_shield_icon(&ui.painter(), rect, SUCCESS_GREEN);
+                        ui.colored_label(SUCCESS_GREEN, RichText::new("MODO ADMIN ACTIVO").strong().small());
+                    });
+                } else {
+                    let admin_btn = egui::Button::new(
+                        RichText::new("🛡 Iniciar como Admin").color(WARNING_AMBER).small().strong(),
+                    );
+                    if ui.add(admin_btn).on_hover_text("Reinicia FreeDesk con UAC para controlar ventanas de sistema y Task Manager").clicked() {
+                        action = Some(ConnectionAction::RequestLocalElevation);
+                    }
                 }
             });
         });
 
-        ui.add_space(15.0);
+        ui.add_space(10.0);
 
-        // Dual card layout (Host vs Viewer)
+        // ── DUAL MAIN CARDS (AnyDesk Style) ──────────────────────────────────
         ui.columns(2, |columns| {
-            // Left Card: Este puesto (Host)
+            // ── LEFT CARD: ESTE PUESTO DE TRABAJO (Host) ─────────────────────
             columns[0].group(|ui| {
-                ui.set_min_height(270.0);
+                ui.set_min_height(280.0);
+
+                // Card Header with vector PC Monitor icon
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("📥 Este puesto de trabajo").heading().strong());
-                    if self.is_admin {
-                        ui.label(RichText::new("[Admin]").color(SUCCESS_GREEN).small());
-                    }
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 20.0), egui::Sense::hover());
+                    draw_pc_monitor(&ui.painter(), icon_rect, ACCENT_RED, Color32::from_rgb(20, 24, 32));
+                    ui.label(RichText::new("Este puesto de trabajo").heading().strong());
                 });
-                ui.label(RichText::new("Comparte tu ID y PIN para que se conecten a tu equipo:").color(TEXT_MUTED));
+
+                ui.label(RichText::new("Comparte tu ID y PIN para que se conecten a este equipo:").color(TEXT_MUTED).small());
+                ui.add_space(8.0);
+
+                // Address Container Box
+                ui.label(RichText::new("Tu Dirección FreeDesk:").color(TEXT_SECONDARY).small());
+                let (box_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), egui::Sense::hover());
+                ui.painter().rect_filled(box_rect, Rounding::same(8.0), BG_INPUT);
+                ui.painter().rect_stroke(box_rect, Rounding::same(8.0), Stroke::new(1.0, BORDER_CARD));
+
+                // Paint ID centered inside container box
+                ui.painter().text(
+                    Pos2::new(box_rect.left() + 16.0, box_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &self.my_peer_id,
+                    egui::FontId::proportional(24.0),
+                    TEXT_PRIMARY,
+                );
+
+                // Copy button inside container box right side
+                let copy_rect = Rect::from_min_size(
+                    Pos2::new(box_rect.right() - 110.0, box_rect.center().y - 16.0),
+                    Vec2::new(100.0, 32.0),
+                );
+                let (btn_text, btn_color) = if self.copied_recently {
+                    ("✓ Copiado!", SUCCESS_GREEN)
+                } else {
+                    ("📋 Copiar", TEXT_PRIMARY)
+                };
+                if ui.put(copy_rect, egui::Button::new(RichText::new(btn_text).color(btn_color).strong())).clicked() {
+                    ui.output_mut(|o| o.copied_text = self.my_peer_id.replace(' ', ""));
+                    self.copied_recently = true;
+                    self.copied_timer = Some(std::time::Instant::now());
+                }
+
                 ui.add_space(10.0);
 
-                ui.label(RichText::new("Tu Dirección FreeDesk:").color(TEXT_MUTED));
+                // PIN Container
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&self.my_peer_id).size(26.0).strong().color(TEXT_PRIMARY));
-                    let copy_text = if self.copied_recently { "✓ ¡Copiado!" } else { "📋 Copiar" };
-                    let copy_color = if self.copied_recently { SUCCESS_GREEN } else { TEXT_PRIMARY };
-                    if ui.button(RichText::new(copy_text).color(copy_color)).clicked() {
-                        ui.output_mut(|o| o.copied_text = self.my_peer_id.replace(' ', ""));
-                        self.copied_recently = true;
-                        self.copied_timer = Some(std::time::Instant::now());
-                    }
-                });
-
-                ui.add_space(8.0);
-                ui.label(RichText::new("PIN de Acceso de un solo uso:").color(TEXT_MUTED));
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&self.my_session_pin).size(20.0).strong().color(ACCENT_RED));
-                    if ui.button("🔄 Nuevo PIN").clicked() {
+                    ui.label(RichText::new("PIN de Acceso temporal:").color(TEXT_SECONDARY).small());
+                    ui.label(RichText::new(&self.my_session_pin).size(18.0).strong().color(ACCENT_RED));
+                    if ui.button("🔄 Nuevo").clicked() {
                         self.refresh_pin();
                     }
                 });
 
                 ui.add_space(10.0);
-                if !self.is_admin {
-                    if ui.button(RichText::new("⚡ Reiniciar con Privilegios de Administrador").color(Color32::from_rgb(241, 196, 15))).clicked() {
-                        action = Some(ConnectionAction::RequestLocalElevation);
-                    }
-                }
+                ui.separator();
+                ui.add_space(4.0);
 
-                ui.add_space(8.0);
-                ui.label(RichText::new("🔒 Cifrado E2E: X25519 + AES-256-GCM + Zeroize Activo").color(SUCCESS_GREEN).small());
-                ui.label(RichText::new("🛡 Hardening: ASLR, DEP y Anti-DLL Hijacking activos").color(SUCCESS_GREEN).small());
+                // Security badges
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔒 Cifrado E2E X25519 + AES-256-GCM").color(SUCCESS_GREEN).small());
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🛡 Hardening: ASLR, DEP y Anti-DLL Hijacking").color(SUCCESS_GREEN).small());
+                });
             });
 
-            // Right Card: Otro puesto (Viewer)
+            // ── RIGHT CARD: OTRO PUESTO (Remote Viewer) ──────────────────────
             columns[1].group(|ui| {
-                ui.set_min_height(270.0);
-                ui.label(RichText::new("📤 Conectarse a otro puesto").heading().strong());
-                ui.label(RichText::new("Introduce el ID del puesto remoto al que deseas acceder:").color(TEXT_MUTED));
-                ui.add_space(10.0);
+                ui.set_min_height(280.0);
 
-                ui.label(RichText::new("Dirección remota (9 dígitos):").color(TEXT_MUTED));
-                ui.add(egui::TextEdit::singleline(&mut self.target_peer_id).hint_text("Ej: 492 810 334").desired_width(220.0));
+                // Card Header with vector Remote Desk icon
+                ui.horizontal(|ui| {
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 20.0), egui::Sense::hover());
+                    draw_remote_desk_icon(&ui.painter(), icon_rect, Color32::from_rgb(52, 152, 219));
+                    ui.label(RichText::new("Conectarse a otro puesto").heading().strong());
+                });
+
+                ui.label(RichText::new("Introduce el ID del puesto remoto al que deseas acceder:").color(TEXT_MUTED).small());
+                ui.add_space(8.0);
+
+                ui.label(RichText::new("Dirección remota (9 dígitos):").color(TEXT_SECONDARY).small());
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.target_peer_id)
+                        .hint_text("Ej: 845 964 434")
+                        .desired_width(ui.available_width()),
+                );
+
+                ui.add_space(6.0);
+                ui.label(RichText::new("PIN de acceso del puesto remoto:").color(TEXT_SECONDARY).small());
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.target_pin)
+                        .hint_text("PIN de 6 dígitos")
+                        .password(true)
+                        .desired_width(ui.available_width()),
+                );
 
                 ui.add_space(8.0);
-                ui.label(RichText::new("PIN remoto:").color(TEXT_MUTED));
-                ui.add(egui::TextEdit::singleline(&mut self.target_pin).hint_text("PIN de 6 dígitos").password(true).desired_width(220.0));
-
-                ui.add_space(10.0);
-                ui.label(RichText::new("Permisos a solicitar:").small().color(TEXT_MUTED));
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.requested_perms.can_control_mouse, "Mouse");
                     ui.checkbox(&mut self.requested_perms.can_control_keyboard, "Teclado");
                     ui.checkbox(&mut self.requested_perms.can_listen_audio, "Audio");
                 });
 
-                ui.add_space(12.0);
-                let connect_btn = egui::Button::new(RichText::new("🚀 Conectar").size(16.0).strong().color(Color32::WHITE))
-                    .min_size(Vec2::new(140.0, 36.0));
+                ui.add_space(10.0);
+
+                // Main Connect Button
+                let connect_btn = egui::Button::new(
+                    RichText::new("🚀 CONECTAR AHORA").size(15.0).strong().color(Color32::WHITE),
+                )
+                .min_size(Vec2::new(ui.available_width(), 40.0))
+                .fill(ACCENT_RED);
 
                 if ui.add(connect_btn).clicked() {
                     let clean_id = self.target_peer_id.replace(' ', "");
                     if !clean_id.is_empty() {
+                        self.record_recent_connection(&clean_id);
                         action = Some(ConnectionAction::Connect {
                             target_id: clean_id,
                             pin: self.target_pin.clone(),
@@ -167,30 +252,62 @@ impl ConnectionPanelState {
             });
         });
 
-        ui.add_space(15.0);
+        ui.add_space(10.0);
 
-        // Network / Relay Configuration (Expanded by default for clarity)
-        egui::CollapsingHeader::new("⚙ Servidor Relay de Conexión")
-            .default_open(true)
+        // ── RECENT SESSIONS SECTION (AnyDesk Style) ───────────────────────────
+        if !self.recent_sessions.is_empty() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🕒 Conexiones Recientes").strong());
+                });
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    for recent in &self.recent_sessions {
+                        let btn = egui::Button::new(format!("🖥 {}", recent.peer_id)).min_size(Vec2::new(120.0, 32.0));
+                        if ui.add(btn).clicked() {
+                            self.target_peer_id = recent.peer_id.clone();
+                        }
+                    }
+                });
+            });
+            ui.add_space(10.0);
+        }
+
+        // ── RELAY SERVER SETTINGS ─────────────────────────────────────────────
+        egui::CollapsingHeader::new("⚙ Servidor Relay de Conexión en la Nube")
+            .default_open(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Servidor Relay:");
-                    ui.add(egui::TextEdit::singleline(&mut self.relay_addr).hint_text("freedesk-relay.onrender.com").desired_width(240.0));
-                    if ui.button("🔄 Reconectar al Servidor").clicked() {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.relay_addr)
+                            .hint_text("freedesk-relay.onrender.com")
+                            .desired_width(260.0),
+                    );
+                    if ui.button("🔄 Reconectar").clicked() {
                         action = Some(ConnectionAction::ReconnectRelay(self.relay_addr.clone()));
                     }
                 });
-                ui.label(RichText::new("Servidor en la nube predeterminado: freedesk-relay.onrender.com (conecta automáticamente al abrir la app)").small().color(TEXT_MUTED));
+                ui.label(
+                    RichText::new("Servidor en Render: https://freedesk-relay.onrender.com (tráfico cifrado E2E)")
+                        .small()
+                        .color(TEXT_MUTED),
+                );
             });
 
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
-        // Status bar
+        // ── STATUS BAR ────────────────────────────────────────────────────────
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(RichText::new(&self.relay_status).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("FreeDesk v0.5.0 • Render Cloud Active • 60 FPS DXGI • Zero-Knowledge").small().color(TEXT_MUTED));
+                ui.label(
+                    RichText::new("FreeDesk v0.6.0 • Render Cloud • 60 FPS DXGI • Zero-Knowledge")
+                        .small()
+                        .color(TEXT_MUTED),
+                );
             });
         });
 
