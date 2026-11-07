@@ -22,7 +22,7 @@ pub enum CursorControlState {
 }
 
 pub struct InputSimulator {
-    last_physical_pos: Mutex<(i32, i32)>,
+    _last_physical_pos: Mutex<(i32, i32)>,
     last_simulated_pos: Mutex<(i32, i32)>,
     last_host_input_time: Mutex<Instant>,
     pub friend_ghost_cursor: Mutex<Option<(f32, f32)>>,
@@ -41,7 +41,7 @@ impl InputSimulator {
             let _ = GetCursorPos(&mut pt);
         }
         Self {
-            last_physical_pos: Mutex::new((pt.x, pt.y)),
+            _last_physical_pos: Mutex::new((pt.x, pt.y)),
             last_simulated_pos: Mutex::new((pt.x, pt.y)),
             last_host_input_time: Mutex::new(Instant::now() - Duration::from_secs(10)),
             friend_ghost_cursor: Mutex::new(None),

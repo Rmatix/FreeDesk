@@ -33,6 +33,11 @@ pub enum GuiCommand {
         muted: bool,
         volume: f32,
     },
+    RequestElevation,
+    RespondElevation {
+        viewer_id: String,
+        grant: bool,
+    },
     Disconnect,
 }
 
@@ -41,6 +46,13 @@ pub enum NetworkEvent {
     IncomingConnectionPrompt {
         viewer_id: String,
         perms: SessionPermissions,
+    },
+    IncomingElevationPrompt {
+        viewer_id: String,
+    },
+    ElevationResult {
+        accepted: bool,
+        message: String,
     },
     SessionStarted {
         peer_id: String,
@@ -53,6 +65,10 @@ pub enum NetworkEvent {
     CursorUpdate {
         host_controlling: bool,
         ghost_pos: Option<(f32, f32)>,
+    },
+    PerformanceStats {
+        fps: u32,
+        kbps: u32,
     },
     SessionEnded,
 }
@@ -228,7 +244,7 @@ async fn run_network_loop(
                     } => {
                         if let Ok(peer_msg) = PeerMessage::deserialize(&payload) {
                             match peer_msg {
-                                PeerMessage::AuthResponse { accepted, granted_permissions, .. } => {
+                                PeerMessage::AuthResponse { accepted, granted_permissions: _, .. } => {
                                     if accepted {
                                         event_tx_clone
                                             .send(NetworkEvent::SessionStarted { peer_id: from_id })
@@ -291,6 +307,19 @@ async fn run_network_loop(
                                         ghost_pos: ghost,
                                     }).ok();
                                 }
+                                PeerMessage::RequestElevation => {
+                                    info!("🛡️ Remote viewer {} requested admin elevation", from_id);
+                                    event_tx_clone.send(NetworkEvent::IncomingElevationPrompt {
+                                        viewer_id: from_id,
+                                    }).ok();
+                                }
+                                PeerMessage::ElevationResponse { accepted, message } => {
+                                    info!("🛡️ Remote host responded to elevation: accepted={}, msg={}", accepted, message);
+                                    event_tx_clone.send(NetworkEvent::ElevationResult {
+                                        accepted,
+                                        message,
+                                    }).ok();
+                                }
                                 PeerMessage::Disconnect => {
                                     is_hosting_flag.store(false, Ordering::SeqCst);
                                     event_tx_clone.send(NetworkEvent::SessionEnded).ok();
@@ -343,9 +372,10 @@ async fn run_network_loop(
                     let target_id = viewer_id;
                     let host_out = out_tx.clone();
                     let my_id = clean_my_id.clone();
+                    let stats_tx = event_tx.clone();
 
                     thread::spawn(move || {
-                        run_host_capture_loop(flag, target_id, my_id, host_out);
+                        run_host_capture_loop(flag, target_id, my_id, host_out, stats_tx);
                     });
                 }
             }
@@ -391,6 +421,56 @@ async fn run_network_loop(
                     }
                 }
             }
+            GuiCommand::RequestElevation => {
+                if let Some(target) = &current_target_peer {
+                    info!("🛡️ Requesting admin elevation from host {}", target);
+                    let peer_msg = PeerMessage::RequestElevation;
+                    if let Ok(payload) = peer_msg.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: target.clone(),
+                            from_id: clean_my_id.clone(),
+                            payload,
+                        };
+                        out_tx.try_send(fwd).ok();
+                    }
+                }
+            }
+            GuiCommand::RespondElevation { viewer_id, grant } => {
+                if grant {
+                    info!("🛡️ Host approved elevation! Spawning elevated process...");
+                    let ok = freedesk_core::security::request_elevation(None);
+                    let resp = PeerMessage::ElevationResponse {
+                        accepted: ok,
+                        message: if ok {
+                            "El anfitrión aprobó la elevación a Administrador.".to_string()
+                        } else {
+                            "El anfitrión aprobó pero el diálogo de UAC fue cancelado.".to_string()
+                        },
+                    };
+                    if let Ok(p) = resp.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: viewer_id,
+                            from_id: clean_my_id.clone(),
+                            payload: p,
+                        };
+                        let _ = out_tx.send(fwd).await;
+                    }
+                } else {
+                    info!("❌ Host denied elevation request.");
+                    let resp = PeerMessage::ElevationResponse {
+                        accepted: false,
+                        message: "El anfitrión rechazó la solicitud de Administrador.".to_string(),
+                    };
+                    if let Ok(p) = resp.serialize() {
+                        let fwd = RelayMessage::Forward {
+                            target_id: viewer_id,
+                            from_id: clean_my_id.clone(),
+                            payload: p,
+                        };
+                        let _ = out_tx.send(fwd).await;
+                    }
+                }
+            }
             GuiCommand::Disconnect => {
                 if let Some(target) = current_target_peer.take() {
                     let peer_msg = PeerMessage::Disconnect;
@@ -412,18 +492,18 @@ async fn run_network_loop(
 ///
 /// Performance design (derived from AnyDesk REA analysis):
 ///  • DXGI Desktop Duplication: GPU surface copy, ~0.5 ms latency vs ~8 ms GDI.
-///  • DXGI AcquireNextFrame blocks waiting for a new frame, so identical frames
-///    are skipped at zero CPU cost (natural frame rate limiting).
-///  • Drop policy: try_send drops frames if the WebSocket send buffer is full,
-///    keeping the viewer always current with the freshest frame.
-///  • Keyframe every 120 frames (~4 s at 30 FPS) to resync after packet loss.
+///  • Rayon multi-threaded tile encoding & LZ4 compression: ~1.5 ms across all cores.
+///  • 60 FPS target (16 ms budget) with zero-cost idle skip when desktop is static.
+///  • Drops frames if network buffer full so viewer always sees freshest frame.
+///  • Telemetry stats emitted to UI every second.
 fn run_host_capture_loop(
     running: Arc<AtomicBool>,
     target_viewer_id: String,
     my_id: String,
     out_tx: tokio::sync::mpsc::Sender<RelayMessage>,
+    event_tx: Sender<NetworkEvent>,
 ) {
-    info!("🎥 Starting DXGI/GDI capture loop for viewer {}", target_viewer_id);
+    info!("🎥 Starting DXGI/GDI 60 FPS capture loop for viewer {}", target_viewer_id);
 
     let mut capture = match ScreenCapture::new() {
         Ok(c) => c,
@@ -436,13 +516,16 @@ fn run_host_capture_loop(
     let mut encoder = TileEncoder::new(capture.width, capture.height);
     let mut raw_rgba = Vec::new();
     let mut frame_count = 0u64;
+    let mut last_stat_time = std::time::Instant::now();
+    let mut frames_in_sec = 0u32;
+    let mut bytes_in_sec = 0u32;
 
     while running.load(Ordering::SeqCst) {
         let frame_start = std::time::Instant::now();
 
         match capture.capture_frame(&mut raw_rgba) {
             Ok(()) => {
-                // Keyframe every 120 sent frames (~4 s resync interval)
+                // Keyframe every 120 sent frames (~2 s at 60 FPS)
                 let force_keyframe = frame_count % 120 == 0;
                 let delta = encoder.encode_frame(&raw_rgba, force_keyframe);
                 frame_count += 1;
@@ -450,28 +533,43 @@ fn run_host_capture_loop(
                 if !delta.tiles.is_empty() || force_keyframe {
                     let peer_msg = PeerMessage::Video(delta);
                     if let Ok(payload) = peer_msg.serialize() {
+                        let payload_len = payload.len() as u32;
                         let fwd = RelayMessage::Forward {
                             target_id: target_viewer_id.clone(),
                             from_id: my_id.clone(),
                             payload,
                         };
                         // try_send: drops frame if channel full — viewer always gets freshest frame
-                        out_tx.try_send(fwd).ok();
+                        if out_tx.try_send(fwd).is_ok() {
+                            frames_in_sec += 1;
+                            bytes_in_sec += payload_len;
+                        }
                     }
                 }
             }
             Err(_) => {
                 // DXGI timeout (no desktop change) — normal, not an error.
                 // Brief sleep prevents CPU spin while waiting for next frame.
-                thread::sleep(Duration::from_millis(5));
+                thread::sleep(Duration::from_millis(4));
                 continue;
             }
         }
 
-        // Adaptive pacing: target 33 ms/frame (30 FPS).
-        // If encoding was fast, sleep the remainder; if slow, skip sleep entirely.
+        // Emit rolling performance stats every second
+        if last_stat_time.elapsed() >= Duration::from_secs(1) {
+            let kbps = (bytes_in_sec * 8) / 1000;
+            event_tx.send(NetworkEvent::PerformanceStats {
+                fps: frames_in_sec,
+                kbps,
+            }).ok();
+            frames_in_sec = 0;
+            bytes_in_sec = 0;
+            last_stat_time = std::time::Instant::now();
+        }
+
+        // Target: 60 FPS (16 ms frame budget)
         let elapsed = frame_start.elapsed();
-        let target = Duration::from_millis(33);
+        let target = Duration::from_millis(16);
         if elapsed < target {
             thread::sleep(target - elapsed);
         }

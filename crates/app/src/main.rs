@@ -9,7 +9,7 @@ use tracing::info;
 // ─── Incoming connection request (host side) ──────────────────────────────────
 struct IncomingRequest {
     viewer_id: String,
-    perms: SessionPermissions,
+    _perms: SessionPermissions,
     // permission toggles the host can override before accepting
     allow_mouse: bool,
     allow_keyboard: bool,
@@ -29,6 +29,9 @@ struct FreeDeskApp {
     conn_panel: ConnectionPanelState,
     bridge: NetworkBridge,
     pending_incoming: Option<IncomingRequest>,
+    pending_elevation: Option<String>, // viewer_id requesting elevation
+    elevation_banner: Option<(String, std::time::Instant)>,
+    is_admin: bool,
     // Host-side audio bar (only shown when hosting)
     host_audio_muted: bool,
     host_audio_volume: f32,
@@ -37,7 +40,9 @@ struct FreeDeskApp {
 impl FreeDeskApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
-        let conn_panel = ConnectionPanelState::default();
+        let mut conn_panel = ConnectionPanelState::default();
+        let is_admin = freedesk_core::security::is_elevated();
+        conn_panel.is_admin = is_admin;
 
         let relay_addr = std::env::var("FREEDESK_RELAY")
             .unwrap_or_else(|_| "freedesk-relay.onrender.com".to_string());
@@ -52,6 +57,9 @@ impl FreeDeskApp {
             conn_panel,
             bridge,
             pending_incoming: None,
+            pending_elevation: None,
+            elevation_banner: None,
+            is_admin,
             host_audio_muted: false,
             host_audio_volume: 0.85,
         }
@@ -67,20 +75,44 @@ impl eframe::App for FreeDeskApp {
                     self.conn_panel.relay_status = status;
                 }
                 NetworkEvent::IncomingConnectionPrompt { viewer_id, perms } => {
-                    info!("⚠️  Incoming connection request from {}", viewer_id);
+                    info!("Incoming connection request from {}", viewer_id);
                     self.pending_incoming = Some(IncomingRequest {
                         allow_mouse: perms.can_control_mouse,
                         allow_keyboard: perms.can_control_keyboard,
                         allow_audio: perms.can_listen_audio,
                         viewer_id,
-                        perms,
+                        _perms: perms,
                     });
+                }
+                NetworkEvent::IncomingElevationPrompt { viewer_id } => {
+                    info!("Incoming elevation request from {}", viewer_id);
+                    self.pending_elevation = Some(viewer_id);
+                }
+                NetworkEvent::ElevationResult { accepted, message } => {
+                    info!("Elevation result: accepted={}, msg={}", accepted, message);
+                    self.elevation_banner = Some((message, std::time::Instant::now()));
+                    if accepted {
+                        if let AppMode::Viewing(session) = &mut self.mode {
+                            session.is_admin = true;
+                        }
+                    }
+                }
+                NetworkEvent::PerformanceStats { fps, kbps } => {
+                    if let AppMode::Viewing(session) = &mut self.mode {
+                        session.fps = fps;
+                        session.kbps = kbps;
+                    } else if let AppMode::Hosting(session) = &mut self.mode {
+                        session.fps = fps;
+                        session.kbps = kbps;
+                    }
                 }
                 NetworkEvent::SessionStarted { peer_id } => {
                     info!("Session started with peer {}", peer_id);
                     // Only switch to Viewing mode if we weren't already in Hosting mode
                     if matches!(self.mode, AppMode::Home) {
-                        self.mode = AppMode::Viewing(SessionViewState::new(peer_id));
+                        let mut session = SessionViewState::new(peer_id);
+                        session.is_admin = self.is_admin;
+                        self.mode = AppMode::Viewing(session);
                     }
                 }
                 NetworkEvent::NewFrame { width, height, rgba } => {
@@ -98,13 +130,17 @@ impl eframe::App for FreeDeskApp {
                     info!("Session ended");
                     self.mode = AppMode::Home;
                     self.pending_incoming = None;
+                    self.pending_elevation = None;
                 }
             }
         }
 
-        // ── 2. Show incoming connection modal (top priority, blocks everything) ──
+        // ── 2. Show incoming modals (top priority) ──────────────────────────
         if self.pending_incoming.is_some() {
             self.show_incoming_modal(ctx);
+        }
+        if self.pending_elevation.is_some() {
+            self.show_elevation_modal(ctx);
         }
 
         // ── 3. Collect UI actions outside borrow scope ───────────────────────
@@ -112,11 +148,28 @@ impl eframe::App for FreeDeskApp {
             None,
             Connect { target_id: String, pin: String, perms: freedesk_core::security::SessionPermissions },
             ReconnectRelay(String),
-            ViewerInputs { inputs: Vec<freedesk_core::protocol::InputEvent>, audio_muted: bool, audio_volume: f32, disconnect: bool },
+            RequestLocalElevation,
+            ViewerInputs {
+                inputs: Vec<freedesk_core::protocol::InputEvent>,
+                audio_muted: bool,
+                audio_volume: f32,
+                disconnect: bool,
+                request_elevation: bool,
+            },
             HostDisconnect,
         }
 
         let ui_result = CentralPanel::default().show(ctx, |ui| {
+            // Show temporary elevation notification banner if active
+            if let Some((msg, timer)) = &self.elevation_banner {
+                if timer.elapsed().as_secs() < 5 {
+                    ui.group(|ui| {
+                        ui.colored_label(Color32::from_rgb(241, 196, 15), format!("🛡 {}", msg));
+                    });
+                    ui.add_space(4.0);
+                }
+            }
+
             match &mut self.mode {
                 AppMode::Home => {
                     if let Some(action) = self.conn_panel.render(ui) {
@@ -126,6 +179,9 @@ impl eframe::App for FreeDeskApp {
                             }
                             ConnectionAction::ReconnectRelay(new_addr) => {
                                 UiResult::ReconnectRelay(new_addr)
+                            }
+                            ConnectionAction::RequestLocalElevation => {
+                                UiResult::RequestLocalElevation
                             }
                         }
                     } else {
@@ -138,7 +194,14 @@ impl eframe::App for FreeDeskApp {
                     let audio_muted = session.floating_audio.is_muted;
                     let audio_volume = session.floating_audio.volume;
                     let disconnect = matches!(action, Some(SessionAction::Disconnect));
-                    UiResult::ViewerInputs { inputs, audio_muted, audio_volume, disconnect }
+                    let request_elevation = matches!(action, Some(SessionAction::RequestElevation));
+                    UiResult::ViewerInputs {
+                        inputs,
+                        audio_muted,
+                        audio_volume,
+                        disconnect,
+                        request_elevation,
+                    }
                 }
 
                 AppMode::Hosting(session) => {
@@ -161,7 +224,9 @@ impl eframe::App for FreeDeskApp {
                     pin,
                     perms,
                 }).ok();
-                self.mode = AppMode::Viewing(SessionViewState::new(target_id));
+                let mut session = SessionViewState::new(target_id);
+                session.is_admin = self.is_admin;
+                self.mode = AppMode::Viewing(session);
             }
             UiResult::ReconnectRelay(new_addr) => {
                 info!("Reconnecting to relay: {}", new_addr);
@@ -171,7 +236,11 @@ impl eframe::App for FreeDeskApp {
                     self.conn_panel.my_session_pin.clone(),
                 );
             }
-            UiResult::ViewerInputs { inputs, audio_muted, audio_volume, disconnect } => {
+            UiResult::RequestLocalElevation => {
+                info!("Requesting local elevation...");
+                freedesk_core::security::request_elevation(None);
+            }
+            UiResult::ViewerInputs { inputs, audio_muted, audio_volume, disconnect, request_elevation } => {
                 for evt in inputs {
                     self.bridge.cmd_tx.send(GuiCommand::SendInput(evt)).ok();
                 }
@@ -179,6 +248,9 @@ impl eframe::App for FreeDeskApp {
                     muted: audio_muted,
                     volume: audio_volume,
                 }).ok();
+                if request_elevation {
+                    self.bridge.cmd_tx.send(GuiCommand::RequestElevation).ok();
+                }
                 if disconnect {
                     self.bridge.cmd_tx.send(GuiCommand::Disconnect).ok();
                     self.mode = AppMode::Home;
@@ -210,16 +282,12 @@ impl FreeDeskApp {
             .rect_filled(screen_rect, 0.0, Color32::from_rgba_premultiplied(0, 0, 0, 160));
 
         let Some(req) = &mut self.pending_incoming else { return };
-
         let viewer_id_clone = req.viewer_id.clone();
-        let allow_mouse = req.allow_mouse;
-        let allow_keyboard = req.allow_keyboard;
-        let allow_audio = req.allow_audio;
 
         let mut accepted = false;
         let mut rejected = false;
 
-        egui::Window::new("🚨 Solicitud de Conexión Entrante")
+        egui::Window::new("Solicitud de Conexión Entrante")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -235,7 +303,7 @@ impl FreeDeskApp {
                         .size(16.0),
                 );
                 ui.add_space(6.0);
-                ui.label(format!("🖥️  Desde: {}", viewer_id_clone));
+                ui.label(format!("🖥  Desde: {}", viewer_id_clone));
                 ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(8.0);
@@ -246,8 +314,8 @@ impl FreeDeskApp {
 
                 if let Some(req_mut) = &mut self.pending_incoming {
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut req_mut.allow_mouse, "🖱️  Control de Mouse");
-                        ui.checkbox(&mut req_mut.allow_keyboard, "⌨️  Control de Teclado");
+                        ui.checkbox(&mut req_mut.allow_mouse, "🖱  Control de Mouse");
+                        ui.checkbox(&mut req_mut.allow_keyboard, "⌨  Control de Teclado");
                     });
                     ui.checkbox(&mut req_mut.allow_audio, "🔊 Escuchar Audio");
                 }
@@ -259,13 +327,13 @@ impl FreeDeskApp {
                 // Action buttons
                 ui.horizontal(|ui| {
                     let accept_btn = egui::Button::new(
-                        RichText::new("✅  ACEPTAR").strong().color(Color32::WHITE).size(15.0),
+                        RichText::new("✓  ACEPTAR").strong().color(Color32::WHITE).size(15.0),
                     )
                     .min_size(Vec2::new(140.0, 42.0))
                     .fill(Color32::from_rgb(39, 174, 96));
 
                     let reject_btn = egui::Button::new(
-                        RichText::new("❌  RECHAZAR").strong().color(Color32::WHITE).size(15.0),
+                        RichText::new("✕  RECHAZAR").strong().color(Color32::WHITE).size(15.0),
                     )
                     .min_size(Vec2::new(140.0, 42.0))
                     .fill(Color32::from_rgb(192, 57, 43));
@@ -291,19 +359,105 @@ impl FreeDeskApp {
                     can_sync_clipboard: false,
                     can_transfer_files: false,
                 };
-                info!("✅ Accepted connection from {}", req.viewer_id);
+                info!("Accepted connection from {}", req.viewer_id);
                 self.bridge.cmd_tx.send(GuiCommand::AcceptIncoming {
                     viewer_id: req.viewer_id.clone(),
                     perms: granted,
                 }).ok();
                 // Switch to Hosting mode
-                self.mode = AppMode::Hosting(SessionViewState::new(req.viewer_id));
+                let mut session = SessionViewState::new(req.viewer_id);
+                session.is_admin = self.is_admin;
+                self.mode = AppMode::Hosting(session);
             }
         } else if rejected {
             if let Some(req) = self.pending_incoming.take() {
-                info!("❌ Rejected connection from {}", req.viewer_id);
+                info!("Rejected connection from {}", req.viewer_id);
                 self.bridge.cmd_tx.send(GuiCommand::RejectIncoming {
                     viewer_id: req.viewer_id,
+                }).ok();
+            }
+        }
+    }
+
+    /// AnyDesk-style UAC Elevation approval modal (shown on host).
+    fn show_elevation_modal(&mut self, ctx: &egui::Context) {
+        // Semi-transparent overlay
+        let screen_rect = ctx.screen_rect();
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("overlay_elev")))
+            .rect_filled(screen_rect, 0.0, Color32::from_rgba_premultiplied(0, 0, 0, 160));
+
+        let Some(viewer_id) = &self.pending_elevation else { return };
+        let viewer_id_clone = viewer_id.clone();
+
+        let mut grant = false;
+        let mut deny = false;
+
+        egui::Window::new("🛡 Solicitud de Modo Administrador")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_size(Vec2::new(420.0, 240.0))
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+
+                ui.colored_label(
+                    Color32::from_rgb(241, 196, 15),
+                    RichText::new("🛡 El visitante solicita derechos de Administrador (UAC)")
+                        .strong()
+                        .size(15.0),
+                );
+                ui.add_space(8.0);
+                ui.label(format!("Puesto remoto: {}", viewer_id_clone));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Al aceptar, Windows mostrará un diálogo de Control de Cuentas de Usuario (UAC). \
+                         FreeDesk se reiniciará con permisos elevados para permitir interactuar con el \
+                         Administrador de Tareas, instaladores y ventanas del sistema.",
+                    )
+                    .small()
+                    .color(Color32::from_rgb(200, 200, 200)),
+                );
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    let grant_btn = egui::Button::new(
+                        RichText::new("✓ Conceder y Elevar").strong().color(Color32::WHITE).size(14.0),
+                    )
+                    .min_size(Vec2::new(160.0, 38.0))
+                    .fill(Color32::from_rgb(39, 174, 96));
+
+                    let deny_btn = egui::Button::new(
+                        RichText::new("✕ Denegar").strong().color(Color32::WHITE).size(14.0),
+                    )
+                    .min_size(Vec2::new(140.0, 38.0))
+                    .fill(Color32::from_rgb(192, 57, 43));
+
+                    if ui.add(grant_btn).clicked() {
+                        grant = true;
+                    }
+                    ui.add_space(12.0);
+                    if ui.add(deny_btn).clicked() {
+                        deny = true;
+                    }
+                });
+                ui.add_space(6.0);
+            });
+
+        if grant {
+            if let Some(vid) = self.pending_elevation.take() {
+                self.bridge.cmd_tx.send(GuiCommand::RespondElevation {
+                    viewer_id: vid,
+                    grant: true,
+                }).ok();
+            }
+        } else if deny {
+            if let Some(vid) = self.pending_elevation.take() {
+                self.bridge.cmd_tx.send(GuiCommand::RespondElevation {
+                    viewer_id: vid,
+                    grant: false,
                 }).ok();
             }
         }

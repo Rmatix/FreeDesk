@@ -64,6 +64,13 @@ pub enum PeerMessage {
         ghost_x: Option<f32>,
         ghost_y: Option<f32>,
     },
+    /// Viewer requests UAC administrator elevation on host
+    RequestElevation,
+    /// Host decision on elevation request
+    ElevationResponse {
+        accepted: bool,
+        message: String,
+    },
     /// Terminate session gracefully
     Disconnect,
 }

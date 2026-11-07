@@ -9,6 +9,7 @@
 //!  • Per-tile LZ4 compression stays; a future upgrade path is zstd level 1
 //!    (better ratio at same speed) for slow links.
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub const TILE_SIZE: usize = 128; // 128×128 — 4× larger than old 64×64
@@ -53,46 +54,66 @@ impl TileEncoder {
         }
     }
 
-    /// Encodes a full RGBA frame into a DeltaFrame.
-    /// Only changed tiles are included; unchanged tiles are skipped entirely.
+    /// Encodes a full RGBA frame into a DeltaFrame using parallel rayon worker threads.
+    /// xxHash3 detection and LZ4 tile compression run concurrently across all CPU cores.
     pub fn encode_frame(&mut self, rgba_data: &[u8], force_keyframe: bool) -> DeltaFrame {
         let tiles_x = (self.width as usize + TILE_SIZE - 1) / TILE_SIZE;
         let tiles_y = (self.height as usize + TILE_SIZE - 1) / TILE_SIZE;
-        let mut changed_tiles = Vec::new();
-        let mut tile_buf = Vec::with_capacity(TILE_SIZE * TILE_SIZE * 4);
+        let width = self.width as usize;
 
+        // Generate coordinates for all tiles
+        let mut tile_coords = Vec::with_capacity(tiles_x * tiles_y);
         for ty in 0..tiles_y {
             for tx in 0..tiles_x {
                 let tile_idx = ty * tiles_x + tx;
                 let start_x = tx * TILE_SIZE;
                 let start_y = ty * TILE_SIZE;
-                let tile_w = (self.width as usize - start_x).min(TILE_SIZE) as u16;
-                let tile_h = (self.height as usize - start_y).min(TILE_SIZE) as u16;
+                let tile_w = (width - start_x).min(TILE_SIZE);
+                let tile_h = (self.height as usize - start_y).min(TILE_SIZE);
+                tile_coords.push((tile_idx, tx, ty, start_x, start_y, tile_w, tile_h));
+            }
+        }
 
-                // Extract tile pixels
-                tile_buf.clear();
-                for row in 0..tile_h as usize {
-                    let row_start = ((start_y + row) * self.width as usize + start_x) * 4;
-                    let row_end = row_start + tile_w as usize * 4;
+        // Process all tiles in parallel: extract pixels, xxHash3 diff check, and LZ4 compression
+        let results: Vec<(usize, u64, Option<ChangedTile>)> = tile_coords
+            .into_par_iter()
+            .map(|(tile_idx, tx, ty, start_x, start_y, tile_w, tile_h)| {
+                let mut tile_buf = Vec::with_capacity(tile_w * tile_h * 4);
+                for row in 0..tile_h {
+                    let row_start = ((start_y + row) * width + start_x) * 4;
+                    let row_end = row_start + tile_w * 4;
                     if row_end <= rgba_data.len() {
                         tile_buf.extend_from_slice(&rgba_data[row_start..row_end]);
                     }
                 }
 
-                // xxHash3 — ~10× faster than FNV for large tiles
                 let hash = xxhash3_64(&tile_buf);
+                let prev_hash = self.prev_tile_hashes[tile_idx];
 
-                if force_keyframe || self.prev_tile_hashes[tile_idx] != hash {
-                    self.prev_tile_hashes[tile_idx] = hash;
+                if force_keyframe || prev_hash != hash {
                     let compressed = super::lz4::compress(&tile_buf);
-                    changed_tiles.push(ChangedTile {
-                        tile_x: tx as u16,
-                        tile_y: ty as u16,
-                        width: tile_w,
-                        height: tile_h,
-                        compressed_pixels: compressed,
-                    });
+                    (
+                        tile_idx,
+                        hash,
+                        Some(ChangedTile {
+                            tile_x: tx as u16,
+                            tile_y: ty as u16,
+                            width: tile_w as u16,
+                            height: tile_h as u16,
+                            compressed_pixels: compressed,
+                        }),
+                    )
+                } else {
+                    (tile_idx, hash, None)
                 }
+            })
+            .collect();
+
+        let mut changed_tiles = Vec::with_capacity(results.len());
+        for (idx, hash, maybe_tile) in results {
+            self.prev_tile_hashes[idx] = hash;
+            if let Some(tile) = maybe_tile {
+                changed_tiles.push(tile);
             }
         }
 

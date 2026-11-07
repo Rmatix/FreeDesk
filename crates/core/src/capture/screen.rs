@@ -72,7 +72,7 @@ impl ScreenCapture {
 struct DxgiCapture {
     width: u32,
     height: u32,
-    device: ID3D11Device,
+    _device: ID3D11Device,
     context: ID3D11DeviceContext,
     dupl: IDXGIOutputDuplication,
     staging: ID3D11Texture2D,
@@ -123,7 +123,7 @@ impl DxgiCapture {
             device.CreateTexture2D(&staging_desc, None, Some(&mut staging))?;
             let staging = staging.ok_or_else(|| anyhow::anyhow!("No staging texture"))?;
 
-            Ok(Self { width, height, device, context, dupl, staging })
+            Ok(Self { width, height, _device: device, context, dupl, staging })
         }
     }
 

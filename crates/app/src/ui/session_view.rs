@@ -16,8 +16,10 @@ pub struct SessionViewState {
     pub texture: Option<TextureHandle>,
     pub floating_audio: FloatingAudioState,
     pub fps: u32,
+    pub kbps: u32,
     pub latency_ms: u32,
     pub e2e_secure: bool,
+    pub is_admin: bool,
     // Dual-cursor state updated from NetworkEvent::CursorUpdate
     pub host_controlling: bool,
     pub friend_ghost_pos: Option<(f32, f32)>, // normalised 0..1
@@ -32,8 +34,10 @@ impl SessionViewState {
             texture: None,
             floating_audio: FloatingAudioState::default(),
             fps: 60,
+            kbps: 0,
             latency_ms: 0,
             e2e_secure: true,
+            is_admin: false,
             host_controlling: true,
             friend_ghost_pos: None,
         }
@@ -60,10 +64,21 @@ impl SessionViewState {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Conectado a: {}", self.target_id)).strong());
             ui.separator();
-            ui.label(RichText::new(format!("⚡ {} ms", self.latency_ms)).color(SUCCESS_GREEN).small());
-            ui.label(RichText::new(format!("🖥️ {} FPS", self.fps)).color(SUCCESS_GREEN).small());
+            ui.label(RichText::new(format!("⚡ {} FPS", self.fps)).color(SUCCESS_GREEN).small());
+            if self.kbps > 0 {
+                ui.label(RichText::new(format!("{} kb/s", self.kbps)).color(TEXT_MUTED).small());
+            }
             if self.e2e_secure {
                 ui.label(RichText::new("🔒 E2E Cifrado").color(SUCCESS_GREEN).small());
+            }
+
+            ui.separator();
+
+            // Admin status or elevation request button
+            if self.is_admin {
+                ui.label(RichText::new("🛡 ADMIN").color(SUCCESS_GREEN).strong().small());
+            } else if ui.button(RichText::new("🛡 Solicitar Admin").color(Color32::from_rgb(241, 196, 15)).small()).clicked() {
+                action = Some(SessionAction::RequestElevation);
             }
 
             ui.separator();
@@ -71,13 +86,13 @@ impl SessionViewState {
             // Cursor status indicator
             if self.host_controlling {
                 ui.label(
-                    RichText::new("🖱️ Control: [Host]")
+                    RichText::new("● Control: [Host]")
                         .color(Color32::from_rgb(241, 196, 15))
                         .small(),
                 );
             } else {
                 ui.label(
-                    RichText::new("🖱️ Control: [Tú]")
+                    RichText::new("● Control: [Tú]")
                         .color(Color32::from_rgb(39, 174, 96))
                         .small(),
                 );
@@ -89,7 +104,7 @@ impl SessionViewState {
             let audio_btn_text = if self.floating_audio.is_open {
                 "🔊 Ocultar Audio"
             } else {
-                "🔊 Mostrar Audio"
+                "🔊 Audio"
             };
             if ui.button(audio_btn_text).clicked() {
                 self.floating_audio.is_open = !self.floating_audio.is_open;
@@ -97,7 +112,7 @@ impl SessionViewState {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(RichText::new("❌ Desconectar").color(ACCENT_RED).strong())
+                    .button(RichText::new("✕ Desconectar").color(ACCENT_RED).strong())
                     .clicked()
                 {
                     action = Some(SessionAction::Disconnect);
@@ -239,4 +254,5 @@ fn egui_key_to_vk(key: egui::Key) -> u16 {
 
 pub enum SessionAction {
     Disconnect,
+    RequestElevation,
 }
