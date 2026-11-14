@@ -104,6 +104,10 @@ struct X11Capture {
     pub height: u32,
     conn: x11rb::rust_connection::RustConnection,
     root: u32,
+    /// Scanline pad bits (from X server setup) — usually 32
+    bitmap_pad: usize,
+    /// Previous frame hash for change detection (avoid sending identical frames)
+    prev_hash: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -117,21 +121,35 @@ impl X11Capture {
         let width = screen.width_in_pixels as u32;
         let height = screen.height_in_pixels as u32;
 
+        // Get server bitmap scanline padding requirement (usually 32 bits = 4 bytes aligned)
+        let bitmap_pad = conn.setup().bitmap_format_scanline_pad as usize;
+        tracing::info!("X11 bitmap_format_scanline_pad = {} bits", bitmap_pad);
+
         Ok(Self {
             width,
             height,
             conn,
             root,
+            bitmap_pad,
+            prev_hash: 0,
         })
     }
 
     fn capture_frame(&mut self, output: &mut Vec<u8>) -> anyhow::Result<()> {
         use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
 
-        let expected = (self.width * self.height * 4) as usize;
-        if output.len() != expected {
-            output.resize(expected, 0);
-        }
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let expected_rgba = w * h * 4;
+
+        // X11 scanline stride may be padded — calculate actual row stride in bytes
+        let pad_bytes = self.bitmap_pad / 8; // bits → bytes (usually 4)
+        // For 32bpp ZPixmap: row_stride = ceil(width * 4 / pad_bytes) * pad_bytes
+        let row_stride = if pad_bytes > 0 {
+            ((w * 4 + pad_bytes - 1) / pad_bytes) * pad_bytes
+        } else {
+            w * 4
+        };
 
         let reply = self.conn.get_image(
             ImageFormat::Z_PIXMAP,
@@ -144,15 +162,62 @@ impl X11Capture {
         )?.reply()?;
 
         let data = &reply.data;
-        if data.len() >= expected {
-            output.copy_from_slice(&data[..expected]);
-        } else {
-            let copy_len = data.len().min(expected);
+        let total_stride_bytes = row_stride * h;
+
+        if data.len() < total_stride_bytes && data.len() < expected_rgba {
+            // Partial data — skip frame
+            return Err(anyhow::anyhow!("X11 get_image returned incomplete data ({} bytes, expected {})", data.len(), total_stride_bytes));
+        }
+
+        // Quick hash on raw data to detect "no change" and avoid wasting CPU + bandwidth
+        let frame_hash = fnv_hash(data);
+        if frame_hash == self.prev_hash {
+            // Identical frame — signal "no desktop changes" just like DXGI does
+            return Err(anyhow::anyhow!("No desktop changes"));
+        }
+        self.prev_hash = frame_hash;
+
+        // Resize output buffer if needed
+        if output.len() != expected_rgba {
+            output.resize(expected_rgba, 0);
+        }
+
+        // X11 ZPixmap on a 24/32-bit display is BGRA (little-endian ARGB32).
+        // The tile encoder does BGRA→RGBA swap internally for changed tiles,
+        // so we output raw BGRA here (consistent with DXGI/GDI output).
+        if row_stride == w * 4 {
+            // No padding — fast path: direct copy
+            let copy_len = data.len().min(expected_rgba);
             output[..copy_len].copy_from_slice(&data[..copy_len]);
+        } else {
+            // Padded rows — copy row by row, skipping padding bytes
+            let dst_row = w * 4;
+            for y in 0..h {
+                let src_start = y * row_stride;
+                let dst_start = y * dst_row;
+                if src_start + dst_row <= data.len() {
+                    output[dst_start..dst_start + dst_row]
+                        .copy_from_slice(&data[src_start..src_start + dst_row]);
+                }
+            }
         }
 
         Ok(())
     }
+}
+
+/// Fast FNV-1a 64-bit hash for change detection (much faster than xxHash for this use)
+#[cfg(target_os = "linux")]
+fn fnv_hash(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    // Sample every 64 bytes for speed — good enough for change detection
+    let mut hash = FNV_OFFSET;
+    for chunk in data.chunks(64) {
+        hash ^= chunk[0] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 // ─── DXGI Desktop Duplication backend (Windows) ──────────────────────────────

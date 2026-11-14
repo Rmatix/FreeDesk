@@ -176,8 +176,9 @@ async fn run_network_loop(
         }
     }
 
-    // Bounded channel to prevent queue lag: size of 2 drops old frames automatically!
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<RelayMessage>(2);
+    // Bounded channel: size=4 for video frames (drops oldest when full).
+    // Important control messages (chat, disconnect) use out_tx.send() which awaits space.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<RelayMessage>(4);
 
     // Outbound sender task
     tokio::spawn(async move {
@@ -508,7 +509,8 @@ async fn run_network_loop(
                             from_id: clean_my_id.clone(),
                             payload,
                         };
-                        out_tx.try_send(fwd).ok();
+                        // Use blocking send for chat — must be delivered, not dropped!
+                        let _ = out_tx.send(fwd).await;
                     }
                 }
             }
@@ -576,6 +578,11 @@ fn run_host_capture_loop(
         Ok(c) => c,
         Err(e) => {
             error!("Failed to initialize screen capture: {:?}", e);
+            // Notify the viewer that capture failed so they see an error instead of blank screen
+            event_tx.send(NetworkEvent::RelayStatus(format!(
+                "🔴 Error: No se pudo iniciar captura de pantalla: {}",
+                e
+            ))).ok();
             return;
         }
     };

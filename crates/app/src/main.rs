@@ -240,10 +240,42 @@ impl eframe::App for FreeDeskApp {
 
                 AppMode::Hosting(session) => {
                     let (action, _inputs) = session.render(ctx, ui);
-                    if matches!(action, Some(SessionAction::Disconnect)) {
-                        UiResult::HostDisconnect
-                    } else {
-                        UiResult::None
+                    match action {
+                        Some(SessionAction::Disconnect) => UiResult::HostDisconnect,
+                        Some(SessionAction::SendChat(txt)) => UiResult::ViewerInputs {
+                            inputs: vec![],
+                            audio_muted: session.floating_audio.is_muted,
+                            audio_volume: session.floating_audio.volume,
+                            disconnect: false,
+                            request_elevation: false,
+                            toggle_fullscreen: false,
+                            send_chat: Some(txt),
+                            sync_clipboard: false,
+                            send_cad: false,
+                        },
+                        Some(SessionAction::SyncClipboard) => UiResult::ViewerInputs {
+                            inputs: vec![],
+                            audio_muted: session.floating_audio.is_muted,
+                            audio_volume: session.floating_audio.volume,
+                            disconnect: false,
+                            request_elevation: false,
+                            toggle_fullscreen: false,
+                            send_chat: None,
+                            sync_clipboard: true,
+                            send_cad: false,
+                        },
+                        Some(SessionAction::SendCtrlAltDel) => UiResult::ViewerInputs {
+                            inputs: vec![],
+                            audio_muted: session.floating_audio.is_muted,
+                            audio_volume: session.floating_audio.volume,
+                            disconnect: false,
+                            request_elevation: false,
+                            toggle_fullscreen: false,
+                            send_chat: None,
+                            sync_clipboard: false,
+                            send_cad: true,
+                        },
+                        _ => UiResult::None,
                     }
                 }
             }
