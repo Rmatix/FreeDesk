@@ -127,12 +127,10 @@ impl eframe::App for FreeDeskApp {
                 }
                 NetworkEvent::SessionStarted { peer_id } => {
                     info!("Session started with peer {}", peer_id);
-                    // Only switch to Viewing mode if we weren't already in Hosting mode
-                    if matches!(self.mode, AppMode::Home) {
-                        let mut session = SessionViewState::new(peer_id);
-                        session.is_admin = self.is_admin;
-                        self.mode = AppMode::Viewing(session);
-                    }
+                    let mut session = SessionViewState::new(peer_id);
+                    session.is_admin = self.is_admin;
+                    session.is_host_mode = false;
+                    self.mode = AppMode::Viewing(session);
                 }
                 NetworkEvent::NewFrame { width, height, rgba } => {
                     if let AppMode::Viewing(session) = &mut self.mode {
@@ -460,6 +458,7 @@ impl FreeDeskApp {
                 // Switch to Hosting mode
                 let mut session = SessionViewState::new(req.viewer_id);
                 session.is_admin = self.is_admin;
+                session.is_host_mode = true;
                 self.mode = AppMode::Hosting(session);
             }
         } else if rejected {

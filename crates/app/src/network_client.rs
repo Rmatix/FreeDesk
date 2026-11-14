@@ -199,6 +199,10 @@ async fn run_network_loop(
     // Shared flag: viewer can request an immediate keyframe resync from the host
     let force_keyframe_flag = Arc::new(AtomicBool::new(false));
 
+    // Track outgoing connection target so we NEVER show an incoming prompt to ourselves!
+    let outgoing_target = Arc::new(std::sync::Mutex::new(Option::<String>::None));
+    let outgoing_target_inbound = outgoing_target.clone();
+
     // Inbound listener from relay
     let event_tx_clone = event_tx.clone();
     let out_tx_inbound = out_tx.clone();
@@ -235,18 +239,40 @@ async fn run_network_loop(
                     RelayMessage::ConnectStatus {
                         peer_id, connected, error,
                     } => {
-                        if connected {
-                            // Prompt host for incoming connection approval!
-                            event_tx_clone
-                                .send(NetworkEvent::IncomingConnectionPrompt {
-                                    viewer_id: peer_id.clone(),
-                                    perms: SessionPermissions::full_control(),
-                                })
-                                .ok();
-                        } else if let Some(err) = error {
-                            event_tx_clone
-                                .send(NetworkEvent::RelayStatus(format!("✕ Error: {}", err)))
-                                .ok();
+                        let is_outgoing = {
+                            let guard = outgoing_target_inbound.lock().unwrap();
+                            guard.as_ref().map(|s| s.replace(' ', "")) == Some(peer_id.replace(' ', ""))
+                        };
+
+                        if is_outgoing {
+                            // We are the VIEWER connecting to this peer — NEVER prompt ourselves!
+                            if connected {
+                                event_tx_clone
+                                    .send(NetworkEvent::RelayStatus(format!(
+                                        "🟡 Conectado al anfitrión {}. Esperando autorización...",
+                                        peer_id
+                                    )))
+                                    .ok();
+                            } else if let Some(err) = error {
+                                event_tx_clone
+                                    .send(NetworkEvent::RelayStatus(format!("✕ Error: {}", err)))
+                                    .ok();
+                                event_tx_clone.send(NetworkEvent::SessionEnded).ok();
+                            }
+                        } else {
+                            // Someone else is connecting to US — prompt host for approval!
+                            if connected {
+                                event_tx_clone
+                                    .send(NetworkEvent::IncomingConnectionPrompt {
+                                        viewer_id: peer_id.clone(),
+                                        perms: SessionPermissions::full_control(),
+                                    })
+                                    .ok();
+                            } else if let Some(err) = error {
+                                event_tx_clone
+                                    .send(NetworkEvent::RelayStatus(format!("✕ Error: {}", err)))
+                                    .ok();
+                            }
                         }
                     }
                     RelayMessage::Forward {
@@ -377,6 +403,7 @@ async fn run_network_loop(
                                 }
                                 PeerMessage::Disconnect => {
                                     is_hosting_flag.store(false, Ordering::SeqCst);
+                                    *outgoing_target_inbound.lock().unwrap() = None;
                                     event_tx_clone.send(NetworkEvent::SessionEnded).ok();
                                 }
                                 _ => {}
@@ -395,6 +422,7 @@ async fn run_network_loop(
         match cmd {
             GuiCommand::Connect { target_id, .. } => {
                 current_target_peer = Some(target_id.clone());
+                *outgoing_target.lock().unwrap() = Some(target_id.clone());
                 let connect_msg = RelayMessage::ConnectToHost {
                     target_id,
                     viewer_id: clean_my_id.clone(),
@@ -571,6 +599,7 @@ async fn run_network_loop(
                 }
             }
             GuiCommand::Disconnect => {
+                *outgoing_target.lock().unwrap() = None;
                 if let Some(target) = current_target_peer.take() {
                     let peer_msg = PeerMessage::Disconnect;
                     if let Ok(payload) = peer_msg.serialize() {

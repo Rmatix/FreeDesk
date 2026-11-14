@@ -22,6 +22,7 @@ pub struct SessionViewState {
     pub e2e_secure: bool,
     pub is_admin: bool,
     pub is_fullscreen: bool,
+    pub is_host_mode: bool,
     pub safety_code: String,
     // In-session chat
     pub chat_messages: Vec<(String, String)>,
@@ -50,6 +51,7 @@ impl SessionViewState {
             e2e_secure: true,
             is_admin: false,
             is_fullscreen: false,
+            is_host_mode: false,
             safety_code,
             chat_messages: Vec::new(),
             show_chat: false,
@@ -185,8 +187,16 @@ impl SessionViewState {
         // Background
         painter.rect_filled(rect, 0.0, BG_DARK);
 
-        // Remote texture
-        if let Some(texture) = &self.texture {
+        // Remote texture or Host Mode indicator
+        if self.is_host_mode {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("🟢 Compartiendo tu pantalla con el puesto remoto {}\n\nTu amigo está viendo tu equipo en tiempo real.\nPuedes chatear o finalizar la sesión con el botón 'Desconectar'.", self.target_id),
+                FontId::proportional(20.0),
+                Color32::from_rgb(46, 204, 113),
+            );
+        } else if let Some(texture) = &self.texture {
             painter.image(
                 texture.id(),
                 rect,
@@ -220,43 +230,45 @@ impl SessionViewState {
             }
         }
 
-        // ── Input Capture on Viewport ────────────────────────────────────────
-        if let Some(hover_pos) = response.hover_pos() {
-            let norm_x = ((hover_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            let norm_y = ((hover_pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+        // ── Input Capture on Viewport (Viewer only) ─────────────────────────
+        if !self.is_host_mode {
+            if let Some(hover_pos) = response.hover_pos() {
+                let norm_x = ((hover_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let norm_y = ((hover_pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
 
-            if response.hovered() {
-                input_events.push(InputEvent::MouseMove { x: norm_x, y: norm_y });
-            }
+                if response.hovered() {
+                    input_events.push(InputEvent::MouseMove { x: norm_x, y: norm_y });
+                }
 
-            if response.clicked_by(PointerButton::Primary) {
-                input_events.push(InputEvent::MouseDown { button: MouseButton::Left });
-                input_events.push(InputEvent::MouseUp { button: MouseButton::Left });
-            }
-            if response.clicked_by(PointerButton::Secondary) {
-                input_events.push(InputEvent::MouseDown { button: MouseButton::Right });
-                input_events.push(InputEvent::MouseUp { button: MouseButton::Right });
-            }
-            if response.clicked_by(PointerButton::Middle) {
-                input_events.push(InputEvent::MouseDown { button: MouseButton::Middle });
-                input_events.push(InputEvent::MouseUp { button: MouseButton::Middle });
-            }
+                if response.clicked_by(PointerButton::Primary) {
+                    input_events.push(InputEvent::MouseDown { button: MouseButton::Left });
+                    input_events.push(InputEvent::MouseUp { button: MouseButton::Left });
+                }
+                if response.clicked_by(PointerButton::Secondary) {
+                    input_events.push(InputEvent::MouseDown { button: MouseButton::Right });
+                    input_events.push(InputEvent::MouseUp { button: MouseButton::Right });
+                }
+                if response.clicked_by(PointerButton::Middle) {
+                    input_events.push(InputEvent::MouseDown { button: MouseButton::Middle });
+                    input_events.push(InputEvent::MouseUp { button: MouseButton::Middle });
+                }
 
-            // Keyboard passthrough
-            ctx.input(|i| {
-                for event in &i.events {
-                    if let egui::Event::Key { key, pressed, .. } = event {
-                        let vk = egui_key_to_vk(*key);
-                        if vk != 0 {
-                            if *pressed {
-                                input_events.push(InputEvent::KeyDown { vk_code: vk });
-                            } else {
-                                input_events.push(InputEvent::KeyUp { vk_code: vk });
+                // Keyboard passthrough
+                ctx.input(|i| {
+                    for event in &i.events {
+                        if let egui::Event::Key { key, pressed, .. } = event {
+                            let vk = egui_key_to_vk(*key);
+                            if vk != 0 {
+                                if *pressed {
+                                    input_events.push(InputEvent::KeyDown { vk_code: vk });
+                                } else {
+                                    input_events.push(InputEvent::KeyUp { vk_code: vk });
+                                }
                             }
                         }
                     }
-                }
-            });
+                });
+            }
         }
 
         // ── Floating Audio Panel overlay ─────────────────────────────────────
