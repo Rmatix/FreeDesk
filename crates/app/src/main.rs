@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use eframe::egui::{self, CentralPanel, Color32, RichText, Vec2};
 use freedesk_app::network_client::{GuiCommand, NetworkBridge, NetworkEvent};

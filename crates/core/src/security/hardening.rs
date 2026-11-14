@@ -18,6 +18,13 @@ pub fn apply_process_hardening() -> anyhow::Result<()> {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // Anti-ptrace / disable core dumps on Linux
+        libc::prctl(libc::PR_SET_DUMPABLE, 0);
+        info!("Hardening: Linux anti-tamper policy applied (PR_SET_DUMPABLE=0).");
+    }
+
     info!("Hardening: Process mitigation rules verified.");
     Ok(())
 }

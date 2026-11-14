@@ -1,11 +1,11 @@
-//! Process elevation and UAC helpers for Windows.
+//! Process elevation and privilege helpers (Windows UAC & Linux pkexec/sudo).
 //!
-//! Provides inspection of process integrity/elevation levels and requesting
-//! elevation via ShellExecuteW with the "runas" verb, matching AnyDesk's elevation flow.
+//! Provides inspection of process elevation levels and requesting
+//! elevation, matching AnyDesk's elevation flow.
 
 use tracing::{info, warn};
 
-/// Checks if the current process is running with administrative privileges (elevated token).
+/// Checks if the current process is running with administrative/root privileges.
 pub fn is_elevated() -> bool {
     #[cfg(windows)]
     {
@@ -31,12 +31,23 @@ pub fn is_elevated() -> bool {
                 }
             }
         }
+        return false;
     }
-    false
+
+    #[cfg(target_os = "linux")]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        false
+    }
 }
 
-/// Requests UAC elevation by re-launching the current executable with the "runas" verb.
-/// An optional command-line parameter can be supplied (e.g. "--elevated").
+/// Requests administrative elevation by re-launching the executable.
+/// On Windows: uses ShellExecuteW with the "runas" verb.
+/// On Linux: uses pkexec (PolicyKit GUI elevation prompt).
 pub fn request_elevation(extra_args: Option<&str>) -> bool {
     #[cfg(windows)]
     {
@@ -60,7 +71,6 @@ pub fn request_elevation(extra_args: Option<&str>) -> bool {
                     None,
                     SW_SHOW,
                 );
-                // Return code > 32 indicates success
                 let code = res.0 as isize;
                 if code > 32 {
                     info!("✅ Elevation request spawned successfully (code: {})", code);
@@ -70,6 +80,31 @@ pub fn request_elevation(extra_args: Option<&str>) -> bool {
                 }
             }
         }
+        return false;
     }
-    false
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(current_exe) = std::env::current_exe() {
+            info!("🛡️ Requesting root elevation via pkexec...");
+            let mut cmd = std::process::Command::new("pkexec");
+            cmd.arg(current_exe);
+            if let Some(arg) = extra_args {
+                cmd.arg(arg);
+            }
+            if let Ok(_child) = cmd.spawn() {
+                info!("✅ Elevation command spawned via pkexec");
+                return true;
+            } else {
+                warn!("❌ Failed to spawn pkexec elevation prompt");
+            }
+        }
+        return false;
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = extra_args;
+        false
+    }
 }

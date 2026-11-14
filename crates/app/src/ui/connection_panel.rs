@@ -323,7 +323,7 @@ impl ConnectionPanelState {
             ui.label(RichText::new(&self.relay_status).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    RichText::new("FreeDesk v0.6.0 • Render Cloud • 60 FPS DXGI • Zero-Knowledge")
+                    RichText::new("FreeDesk v0.10.0 • Multiplatform (Win/Linux) • 60 FPS • Zero-Knowledge")
                         .small()
                         .color(TEXT_MUTED),
                 );

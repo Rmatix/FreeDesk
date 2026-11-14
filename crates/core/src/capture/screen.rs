@@ -1,30 +1,32 @@
-//! DXGI Desktop Duplication screen capture — GPU-accelerated, zero-copy path.
-//! Falls back to GDI BitBlt if DXGI is unavailable (VMs, RDP, old drivers).
-//!
-//! AnyDesk RE analysis (Ghidra / REA) confirms: the binary has NO plain-text GDI
-//! strings, meaning it exclusively uses DXGI Desktop Duplication (IDXGIOutput1::
-//! DuplicateOutput + AcquireNextFrame), which delivers ~0.5 ms capture latency
-//! vs ~8 ms for GDI and skips frames with zero CPU when nothing changes.
+//! Cross-platform Screen Capture — GPU DXGI + GDI on Windows, X11 on Linux.
 
+#[cfg(windows)]
 use windows::core::Interface;
+#[cfg(windows)]
 use windows::Win32::Foundation::HWND;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource,
     ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE,
     D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
+#[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+#[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
     DXGI_OUTDUPL_FRAME_INFO,
 };
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-    GetDC, GetDIBits, ReleaseDC, SelectObject, StretchBlt, SetStretchBltMode,
+    GetDC, GetDIBits, ReleaseDC, SelectObject, SetStretchBltMode,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLORONCOLOR, DIB_RGB_COLORS,
     HBITMAP, HDC, SRCCOPY,
 };
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 // ─── Public ScreenCapture type ───────────────────────────────────────────────
@@ -38,37 +40,124 @@ pub struct ScreenCapture {
 unsafe impl Send for ScreenCapture {}
 
 enum CaptureBackend {
+    #[cfg(windows)]
     Dxgi(DxgiCapture),
+    #[cfg(windows)]
     Gdi(GdiCapture),
+    #[cfg(target_os = "linux")]
+    X11(X11Capture),
+    #[allow(dead_code)]
+    Fallback,
 }
 
 impl ScreenCapture {
     pub fn new() -> anyhow::Result<Self> {
-        match DxgiCapture::new() {
-            Ok(dxgi) => {
-                let (w, h) = (dxgi.width, dxgi.height);
-                tracing::info!("✅ DXGI Desktop Duplication capture initialised ({}×{})", w, h);
-                Ok(Self { width: w, height: h, inner: CaptureBackend::Dxgi(dxgi) })
+        #[cfg(windows)]
+        {
+            match DxgiCapture::new() {
+                Ok(dxgi) => {
+                    let (w, h) = (dxgi.width, dxgi.height);
+                    tracing::info!("✅ DXGI Desktop Duplication capture initialised ({}×{})", w, h);
+                    return Ok(Self { width: w, height: h, inner: CaptureBackend::Dxgi(dxgi) });
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ DXGI unavailable ({}), falling back to GDI BitBlt", e);
+                    let gdi = GdiCapture::new()?;
+                    let (w, h) = (gdi.width, gdi.height);
+                    return Ok(Self { width: w, height: h, inner: CaptureBackend::Gdi(gdi) });
+                }
             }
-            Err(e) => {
-                tracing::warn!("⚠️  DXGI unavailable ({}), falling back to GDI BitBlt", e);
-                let gdi = GdiCapture::new()?;
-                let (w, h) = (gdi.width, gdi.height);
-                Ok(Self { width: w, height: h, inner: CaptureBackend::Gdi(gdi) })
-            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let x11 = X11Capture::new()?;
+            let (w, h) = (x11.width, x11.height);
+            tracing::info!("✅ Linux X11 screen capture initialised ({}×{})", w, h);
+            return Ok(Self { width: w, height: h, inner: CaptureBackend::X11(x11) });
+        }
+
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            Err(anyhow::anyhow!("Unsupported operating system for screen capture"))
         }
     }
 
     pub fn capture_frame(&mut self, output: &mut Vec<u8>) -> anyhow::Result<()> {
         match &mut self.inner {
+            #[cfg(windows)]
             CaptureBackend::Dxgi(d) => d.capture_frame(output),
+            #[cfg(windows)]
             CaptureBackend::Gdi(g) => g.capture_frame(output),
+            #[cfg(target_os = "linux")]
+            CaptureBackend::X11(x) => x.capture_frame(output),
+            CaptureBackend::Fallback => Err(anyhow::anyhow!("Capture backend not supported")),
         }
     }
 }
 
-// ─── DXGI Desktop Duplication backend ────────────────────────────────────────
+// ─── Linux X11 backend ────────────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
+struct X11Capture {
+    pub width: u32,
+    pub height: u32,
+    conn: x11rb::rust_connection::RustConnection,
+    root: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl X11Capture {
+    fn new() -> anyhow::Result<Self> {
+        use x11rb::connection::Connection;
+        let (conn, screen_num) = x11rb::connect(None)
+            .map_err(|e| anyhow::anyhow!("Failed to connect to X11 display: {}", e))?;
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
+        let width = screen.width_in_pixels as u32;
+        let height = screen.height_in_pixels as u32;
+
+        Ok(Self {
+            width,
+            height,
+            conn,
+            root,
+        })
+    }
+
+    fn capture_frame(&mut self, output: &mut Vec<u8>) -> anyhow::Result<()> {
+        use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
+
+        let expected = (self.width * self.height * 4) as usize;
+        if output.len() != expected {
+            output.resize(expected, 0);
+        }
+
+        let reply = self.conn.get_image(
+            ImageFormat::Z_PIXMAP,
+            self.root,
+            0,
+            0,
+            self.width as u16,
+            self.height as u16,
+            !0,
+        )?.reply()?;
+
+        let data = &reply.data;
+        if data.len() >= expected {
+            output.copy_from_slice(&data[..expected]);
+        } else {
+            let copy_len = data.len().min(expected);
+            output[..copy_len].copy_from_slice(&data[..copy_len]);
+        }
+
+        Ok(())
+    }
+}
+
+// ─── DXGI Desktop Duplication backend (Windows) ──────────────────────────────
+
+#[cfg(windows)]
 struct DxgiCapture {
     width: u32,
     height: u32,
@@ -78,11 +167,13 @@ struct DxgiCapture {
     staging: ID3D11Texture2D,
 }
 
+#[cfg(windows)]
 impl DxgiCapture {
     fn new() -> anyhow::Result<Self> {
         unsafe {
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
+
             D3D11CreateDevice(
                 None,
                 D3D_DRIVER_TYPE_HARDWARE,
@@ -94,18 +185,20 @@ impl DxgiCapture {
                 None,
                 Some(&mut context),
             )?;
-            let device = device.ok_or_else(|| anyhow::anyhow!("No D3D11 device"))?;
-            let context = context.ok_or_else(|| anyhow::anyhow!("No D3D11 context"))?;
+
+            let device = device.ok_or_else(|| anyhow::anyhow!("Failed to create D3D11 device"))?;
+            let context = context.ok_or_else(|| anyhow::anyhow!("Failed to create D3D11 context"))?;
 
             let dxgi_device: IDXGIDevice = device.cast()?;
             let adapter = dxgi_device.GetAdapter()?;
             let output = adapter.EnumOutputs(0)?;
             let output1: IDXGIOutput1 = output.cast()?;
+
             let dupl = output1.DuplicateOutput(&device)?;
 
-            let desc = dupl.GetDesc();
-            let width = desc.ModeDesc.Width;
-            let height = desc.ModeDesc.Height;
+            let desc = output1.GetDesc()?;
+            let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
+            let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
 
             let staging_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -115,7 +208,7 @@ impl DxgiCapture {
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: Default::default(),
+                BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 MiscFlags: Default::default(),
             };
@@ -158,109 +251,118 @@ impl DxgiCapture {
 
             // Map staging for CPU read
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context.Map(
-                &staging_res,
-                0,
-                D3D11_MAP_READ,
-                0,
-                Some(&mut mapped),
-            )?;
+            let staging_res: ID3D11Resource = self.staging.cast()?;
+            self.context.Map(&staging_res, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
 
-            let src_stride = mapped.RowPitch as usize;
-            let dst_stride = self.width as usize * 4;
+            let src_pitch = mapped.RowPitch as usize;
+            let dst_pitch = self.width as usize * 4;
             let src_ptr = mapped.pData as *const u8;
+            let dst_ptr = output.as_mut_ptr();
 
-            // Fast contiguous row memcpy (swapping is deferred strictly to changed tiles)
-            for row in 0..self.height as usize {
-                let src_row = std::slice::from_raw_parts(
-                    src_ptr.add(row * src_stride),
-                    dst_stride,
-                );
-                let dst_start = row * dst_stride;
-                output[dst_start..dst_start + dst_stride].copy_from_slice(src_row);
+            // Zero-copy row copy: fast path if row pitch matches desktop width exactly
+            if src_pitch == dst_pitch {
+                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, expected);
+            } else {
+                for y in 0..self.height as usize {
+                    let s = src_ptr.add(y * src_pitch);
+                    let d = dst_ptr.add(y * dst_pitch);
+                    std::ptr::copy_nonoverlapping(s, d, dst_pitch);
+                }
             }
 
             self.context.Unmap(&staging_res, 0);
-            Ok(())
         }
+
+        Ok(())
     }
 }
 
-// ─── GDI fallback backend ─────────────────────────────────────────────────────
+// ─── GDI BitBlt fallback backend (Windows) ───────────────────────────────────
 
+#[cfg(windows)]
 struct GdiCapture {
     width: u32,
     height: u32,
-    native_w: u32,
-    native_h: u32,
     hdc_screen: HDC,
     hdc_mem: HDC,
-    h_bitmap: HBITMAP,
+    hbm: HBITMAP,
     bmi: BITMAPINFO,
 }
 
+#[cfg(windows)]
 impl GdiCapture {
     fn new() -> anyhow::Result<Self> {
         unsafe {
-            let native_w = GetSystemMetrics(SM_CXSCREEN) as u32;
-            let native_h = GetSystemMetrics(SM_CYSCREEN) as u32;
-            // Downscale to 720p on 1080p+ screens
-            let (target_w, target_h) = if native_w >= 1920 { (1280, 720) } else { (native_w, native_h) };
+            let width = GetSystemMetrics(SM_CXSCREEN) as u32;
+            let height = GetSystemMetrics(SM_CYSCREEN) as u32;
 
             let hdc_screen = GetDC(HWND(std::ptr::null_mut()));
-            if hdc_screen.0.is_null() { anyhow::bail!("Failed to get desktop DC"); }
+            if hdc_screen.0.is_null() {
+                return Err(anyhow::anyhow!("GetDC failed"));
+            }
 
             let hdc_mem = CreateCompatibleDC(hdc_screen);
-            let h_bitmap = CreateCompatibleBitmap(hdc_screen, target_w as i32, target_h as i32);
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: target_w as i32,
-                    biHeight: -(target_h as i32),
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                bmiColors: [Default::default(); 1],
-            };
-            SelectObject(hdc_mem, h_bitmap);
-            Ok(Self { width: target_w, height: target_h, native_w, native_h,
-                      hdc_screen, hdc_mem, h_bitmap, bmi })
+            let hbm = CreateCompatibleBitmap(hdc_screen, width as i32, height as i32);
+            SelectObject(hdc_mem, hbm);
+            SetStretchBltMode(hdc_mem, COLORONCOLOR);
+
+            let mut bmi = BITMAPINFO::default();
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = width as i32;
+            bmi.bmiHeader.biHeight = -(height as i32); // top-down DIB
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB.0;
+
+            Ok(Self { width, height, hdc_screen, hdc_mem, hbm, bmi })
         }
     }
 
     fn capture_frame(&mut self, output: &mut Vec<u8>) -> anyhow::Result<()> {
         let expected = (self.width * self.height * 4) as usize;
-        if output.len() != expected { output.resize(expected, 0); }
-        unsafe {
-            let ok = if self.width == self.native_w && self.height == self.native_h {
-                BitBlt(self.hdc_mem, 0, 0, self.width as i32, self.height as i32,
-                       self.hdc_screen, 0, 0, SRCCOPY).is_ok()
-            } else {
-                let _ = SetStretchBltMode(self.hdc_mem, COLORONCOLOR);
-                // StretchBlt returns BOOL (not Result) in this windows version
-                let result = StretchBlt(self.hdc_mem, 0, 0, self.width as i32, self.height as i32,
-                           self.hdc_screen, 0, 0, self.native_w as i32, self.native_h as i32,
-                           SRCCOPY);
-                result.as_bool()
-            };
-            if !ok { anyhow::bail!("GDI BLT failed"); }
-            let lines = GetDIBits(self.hdc_mem, self.h_bitmap, 0, self.height,
-                                   Some(output.as_mut_ptr() as *mut _), &mut self.bmi, DIB_RGB_COLORS);
-            if lines == 0 { anyhow::bail!("GetDIBits failed"); }
-            for px in output.chunks_exact_mut(4) { px.swap(0, 2); px[3] = 255; }
-            Ok(())
+        if output.len() != expected {
+            output.resize(expected, 0);
         }
+
+        unsafe {
+            let bit_ok = BitBlt(
+                self.hdc_mem,
+                0, 0,
+                self.width as i32,
+                self.height as i32,
+                self.hdc_screen,
+                0, 0,
+                SRCCOPY,
+            );
+            if bit_ok.is_err() {
+                return Err(anyhow::anyhow!("BitBlt failed: {:?}", bit_ok));
+            }
+
+            let dib_ok = GetDIBits(
+                self.hdc_mem,
+                self.hbm,
+                0,
+                self.height,
+                Some(output.as_mut_ptr() as *mut _),
+                &mut self.bmi,
+                DIB_RGB_COLORS,
+            );
+            if dib_ok == 0 {
+                return Err(anyhow::anyhow!("GetDIBits failed"));
+            }
+        }
+
+        Ok(())
     }
 }
 
+#[cfg(windows)]
 impl Drop for GdiCapture {
     fn drop(&mut self) {
         unsafe {
-            if !self.h_bitmap.0.is_null() { let _ = DeleteObject(self.h_bitmap); }
-            if !self.hdc_mem.0.is_null() { let _ = DeleteDC(self.hdc_mem); }
-            if !self.hdc_screen.0.is_null() { ReleaseDC(HWND(std::ptr::null_mut()), self.hdc_screen); }
+            let _ = DeleteObject(self.hbm);
+            let _ = DeleteDC(self.hdc_mem);
+            ReleaseDC(HWND(std::ptr::null_mut()), self.hdc_screen);
         }
     }
 }

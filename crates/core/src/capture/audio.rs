@@ -1,20 +1,21 @@
-//! WASAPI Loopback system audio capture for Windows.
+//! WASAPI Loopback system audio capture for Windows, with cross-platform fallback.
 //! Captures all output audio playing on the host PC in real time.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
-use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
-};
+#[cfg(windows)]
+use tracing::error;
+use tracing::info;
 
 pub struct AudioLoopbackCapture {
     running: Arc<AtomicBool>,
+}
+
+impl Default for AudioLoopbackCapture {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AudioLoopbackCapture {
@@ -29,21 +30,34 @@ impl AudioLoopbackCapture {
         let running = self.running.clone();
         running.store(true, Ordering::SeqCst);
 
-        std::thread::spawn(move || {
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            }
+        #[cfg(windows)]
+        {
+            std::thread::spawn(move || {
+                unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_MULTITHREADED,
+                    );
+                }
 
-            if let Err(e) = run_audio_loopback(&running, tx) {
-                error!("Audio loopback capture thread exited with error: {:?}", e);
-            }
+                if let Err(e) = run_audio_loopback(&running, tx) {
+                    error!("Audio loopback capture thread exited with error: {:?}", e);
+                }
 
-            unsafe {
-                CoUninitialize();
-            }
-        });
+                unsafe {
+                    windows::Win32::System::Com::CoUninitialize();
+                }
+            });
 
-        info!("WASAPI Loopback Audio Capture thread launched successfully.");
+            info!("WASAPI Loopback Audio Capture thread launched successfully.");
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = tx;
+            info!("Audio loopback capture is currently Windows-only; non-Windows fallback active.");
+        }
+
         Ok(())
     }
 
@@ -52,10 +66,17 @@ impl AudioLoopbackCapture {
     }
 }
 
+#[cfg(windows)]
 fn run_audio_loopback(
     running: &Arc<AtomicBool>,
     tx: mpsc::Sender<crate::protocol::AudioChunk>,
 ) -> anyhow::Result<()> {
+    use windows::Win32::Media::Audio::{
+        eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;

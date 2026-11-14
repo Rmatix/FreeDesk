@@ -1,6 +1,6 @@
 # 🖥️ FreeDesk — High-Performance Open Source Remote Desktop
 
-> **FreeDesk** es una alternativa moderna, ultrarrápida, 100% gratuita y open-source a AnyDesk y TeamViewer, construida íntegramente en **Rust** para máximo rendimiento, mínimo uso de CPU/RAM y seguridad de grado militar.
+> **FreeDesk** es una alternativa moderna, ultrarrápida, 100% gratuita y open-source a AnyDesk y TeamViewer, construida íntegramente en **Rust** para máximo rendimiento, mínimo uso de CPU/RAM, seguridad de grado militar y **soporte multiplataforma completo (Windows & Linux)**.
 
 ---
 
@@ -8,92 +8,113 @@
 
 | Métrica | AnyDesk / Software tradicional | FreeDesk (Rust) |
 |---|---|---|
-| **Tamaño del Ejecutable** | ~20 - 40 MB | **4.59 MB** (.exe portable) |
+| **Tamaño del Ejecutable** | ~20 - 40 MB | **~4.5 MB** (.exe / ELF portable) |
 | **Consumo de Memoria RAM** | ~70 - 150 MB | **~15 - 25 MB** |
 | **Uso de CPU** | 10% - 25% | **~2% - 5%** |
-| **Tasa de Refresco** | 30 - 60 FPS | **60+ FPS** continuo |
-| **Compresión** | H.264/zstd (~200 MB/s) | **LZ4 + Tile Delta** (5 GB/s) |
+| **Tasa de Refresco** | 30 - 60 FPS | **60 FPS** continuo (DXGI / X11) |
+| **Compresión** | H.264/zstd (~200 MB/s) | **LZ4 + Tile Delta 128×128** (5 GB/s) |
 | **Audio** | Retraso audible (~200ms) | **WASAPI Loopback** (~15ms) |
-| **Licencia** | Comercial / Restrictiva | **MIT (100% Libre)** |
+| **Cifrado** | Cerrado / Propietario | **X25519 + AES-256-GCM (Zero-Knowledge)** |
+| **Licencia** | Comercial / Restrictiva | **MIT (100% Libre y Gratuito)** |
+
+---
+
+## 🐧 Instalación en Linux
+
+FreeDesk se puede instalar en cualquier distribución Linux (Ubuntu, Debian, Fedora, Arch, Manjaro, Mint, etc.) de dos formas:
+
+### Opción 1: Un solo comando en la Terminal (Recomendado)
+Abre tu terminal y ejecuta:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Rmatix/FreeDesk/main/install.sh | bash
+```
+> Esto descarga el binario `freedesk-linux-x86_64`, le da permisos de ejecución, lo instala en `~/.local/bin/freedesk` y crea automáticamente el lanzador en tu menú de aplicaciones.
+
+O descarga y ejecuta directamente sin instalación:
+```bash
+curl -fsSL https://github.com/Rmatix/FreeDesk/releases/latest/download/freedesk-linux-x86_64 -o freedesk && chmod +x freedesk && ./freedesk
+```
+
+### Opción 2: Descarga de archivo
+1. Ve a [Releases en GitHub](https://github.com/Rmatix/FreeDesk/releases).
+2. Descarga `freedesk-linux-x86_64` o `freedesk-linux-x86_64.tar.gz`.
+3. Dale permisos de ejecución:
+   ```bash
+   chmod +x freedesk-linux-x86_64
+   ./freedesk-linux-x86_64
+   ```
+
+---
+
+## 🪟 Instalación en Windows
+
+1. Descarga el ejecutable `freedesk.exe` desde [Releases en GitHub](https://github.com/Rmatix/FreeDesk/releases).
+2. Haz doble clic para abrirlo (aplicación 100% portable, no requiere instalación ni drivers de terceros).
+3. Opcionalmente haz clic en **"🛡️ Iniciar como Admin"** para gestionar pantallas de UAC y enviar combinaciones especiales como Ctrl+Alt+Del.
+
+---
+
+## 🔄 Conectividad Multiplataforma (Windows ⟷ Linux)
+
+FreeDesk permite conectarse y controlar de forma indistinta y totalmente fluida entre ambos sistemas:
+
+- 🖥️ **Windows ➡️ Linux**: Conéctate desde tu PC con Windows al escritorio de un equipo con Linux. Puedes ver su pantalla en tiempo real (X11) y controlar su mouse y teclado.
+- 🐧 **Linux ➡️ Windows**: Conéctate desde Linux para controlar un PC con Windows, ver su pantalla a 60 FPS (DXGI) y gestionar el sistema remoto.
+- 🪟 **Windows ➡️ Windows** y 🐧 **Linux ➡️ Linux**: Total compatibilidad.
+
+Ambos clientes utilizan el mismo servidor Relay en la nube (`wss://freedesk-relay.onrender.com`) y el mismo protocolo de cifrado de extremo a extremo (E2EE) con clave efímera **X25519** y **AES-256-GCM**.
 
 ---
 
 ## 🚀 Características Principales
 
-- 🖥️ **Captura de Pantalla Tile-Delta**: Divide la pantalla en cuadrículas de 64x64 píxeles y comprime con LZ4 **únicamente los bloques que cambian**. Ahorra hasta el 95% del ancho de banda.
-- 🔊 **Panel de Audio Flotante y Movible**:
-  - Arrastra el panel a cualquier lugar de la pantalla.
-  - Monitorea los decibeles de salida del host en tiempo real con un VU-Meter visual.
-  - Control de volumen master y botón de mute rápido.
-  - Captura el sonido nativo de Windows vía **WASAPI Loopback** sin drivers virtuales.
-- 🔒 **Cifrado End-to-End (E2E Zero-Knowledge)**:
-  - Intercambio de claves efímero con **X25519**.
-  - Cifrado simétrico de cada frame y evento con **AES-256-GCM**.
-  - Nonces estrictamente incrementales (protección contra ataques Replay).
-  - Borrado seguro de claves en RAM con **`zeroize`**.
-- 🛡️ **Hardening a Nivel de Sistema Operativo**:
-  - **Anti-DLL Hijacking** (`SetDefaultDllDirectories` a System32).
-  - **ASLR** (Address Space Layout Randomization de alta entropía 64-bit).
-  - **DEP / NX** y mitigación de inyección de código UIPI.
-- 🌐 **Servidor Relay Ligero**: Binario de 800 KB con enrutamiento Zero-Knowledge (el relay jamás puede descifrar la pantalla ni el audio).
+- 🖥️ **Captura de Pantalla Tile-Delta 128×128**:
+  - En Windows: **DXGI Desktop Duplication** directo en GPU (< 0.5 ms de latencia) con fallback a GDI.
+  - En Linux: Captura nativa **X11 ZPixmap / SHM**.
+  - Hash de tiles ultrarrápido con **xxHash3** y compresión en paralelo con **Rayon** + **LZ4 Flex**. Solo transmite los bloques modificados ahorrando el 95% del ancho de banda.
+- 🎯 **Dual Cursor y Prioridad de Host**:
+  - El usuario anfitrión siempre mantiene el control físico de su mouse (si mueve el mouse, la entrada remota se pausa por 900 ms).
+  - El anfitrión puede ver un "cursor fantasma" semitransparente que indica dónde apunta su invitado sin interferir en su trabajo.
+- 💬 **Chat Integrado en Sesión**: Chat lateral deslizable en tiempo real durante la conexión.
+- 📋 **Sincronización de Portapapeles (Clipboard)**: Copia texto en un equipo y pégalo al instante en el otro.
+- 🛡️ **Elevación de Privilegios Remota**:
+  - En Windows: Soporte de elevación de token UAC (`ShellExecuteW` con `runas`).
+  - En Linux: Elevación mediante `pkexec` / PolicyKit.
+- 🔒 **Seguridad Militar Zero-Knowledge**:
+  - Claves criptográficas efímeras X25519 por sesión.
+  - El servidor Relay jamás puede ver la pantalla, el audio, las teclas ni el chat.
+  - Borrado seguro de claves en RAM con `zeroize`.
+  - Hardening contra inyecciones y DLL Hijacking (`SetDefaultDllDirectories` / `PR_SET_DUMPABLE`).
 
 ---
 
 ## 📂 Estructura del Proyecto
 
 ```
-anydesk copia/
+FreeDesk/
 ├── Cargo.toml                  # Workspace raíz de Cargo
+├── install.sh                  # Instalador one-line para Linux
+├── .github/workflows/          # CI/CD automatizado para Windows y Linux
+│   └── release.yml
 ├── crates/
 │   ├── core/                   # Núcleo de alto rendimiento
 │   │   ├── src/
-│   │   │   ├── capture/        # Captura de pantalla GDI/DXGI y Audio WASAPI Loopback
-│   │   │   ├── codec/          # Compresor LZ4 y codificador Tile-Delta 64x64
+│   │   │   ├── capture/        # Captura DXGI/GDI (Windows) y X11 (Linux)
+│   │   │   ├── codec/          # Compresor LZ4 y codificador Tile-Delta 128×128
 │   │   │   ├── crypto/         # X25519 + AES-256-GCM + Zeroize
-│   │   │   ├── input/          # Simulador Win32 SendInput (mouse/teclado)
+│   │   │   ├── input/          # Win32 SendInput y Linux X11 XTest
 │   │   │   ├── protocol/       # Protocolo binario de red y serialización
-│   │   │   └── security/       # Hardening, permisos y rate limiter
+│   │   │   └── security/       # UAC / pkexec, Hardening, permisos y tokens
 │   ├── relay/                  # Servidor de retransmisión Zero-Knowledge
 │   │   └── src/main.rs         # Manejador de IDs de 9 dígitos y enrutamiento
 │   └── app/                    # Aplicación cliente GUI (egui/eframe)
 │       └── src/
-│           ├── ui/             # Panel estilo AnyDesk, visor 60 FPS y Panel Flotante
-│           └── main.rs         # Entry point de FreeDesk
-└── target/release/
-    ├── freedesk.exe            # 4.59 MB (Cliente gráfico)
-    └── freedesk-relay.exe      # 0.80 MB (Servidor relay)
+│           ├── ui/             # Panel estilo AnyDesk, visor 60 FPS, chat y panel de control
+│           └── main.rs         # Entry point multiplataforma
 ```
 
 ---
 
-## 🛠️ Cómo Ejecutar
+## 🎯 Licencia
 
-### 1. Iniciar el Servidor Relay (Opcional si usas tu propio servidor)
-```powershell
-.\target\release\freedesk-relay.exe
-```
-El servidor escuchará en el puerto `7070` gestionando conexiones con Zero-Knowledge.
-
-### 2. Iniciar la Aplicación FreeDesk
-```powershell
-.\target\release\freedesk.exe
-```
-- Copia tu ID de 9 dígitos (ej: `348 912 604`) y el PIN generado.
-- Para conectarte a otro PC, introduce su ID y pulsa **Conectar**.
-
----
-
-## 🎯 Auditoría de Seguridad & Pentesting
-
-Para certificar la seguridad del binario y el protocolo:
-
-1. **Inspección de Binario con REA + Ghidra 12.1**:
-   - Inspeccionar la tabla de símbolos y memoria estática con REA:
-   - Verificar la ausencia de claves privadas o fugas en texto plano en el binario compilado.
-2. **Fuzzing de Protocolo**:
-   - Fuzzing de los parsers LZ4 y paquetes con `cargo-fuzz`:
-   ```bash
-   cargo fuzz run tile_parser
-   ```
-3. **Auditoría de Tráfico (Wireshark)**:
-   - Capturar el tráfico en el puerto `7070` para verificar que la totalidad del flujo sea indiscernible y cifrado por AES-256-GCM.
+Distribuido bajo la licencia **MIT**. Consulta `LICENSE` para más información. 100% Software Libre para uso personal y comercial.

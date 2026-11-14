@@ -1,5 +1,8 @@
 # Rust build artifacts
 target/
+target-linux/
+freedesk-linux-x86_64
+freedesk-linux-x86_64.tar.gz
 **/*.rs.bk
 *.pdb
 

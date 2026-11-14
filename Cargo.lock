@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "freedesk-app"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -945,12 +945,13 @@ dependencies = [
 
 [[package]]
 name = "freedesk-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "bincode",
  "criterion",
+ "libc",
  "lz4_flex",
  "rand 0.8.8",
  "rayon",
@@ -961,13 +962,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
+ "x11rb",
  "x25519-dalek",
  "zeroize",
 ]
 
 [[package]]
 name = "freedesk-relay"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bincode",
