@@ -80,6 +80,8 @@ pub enum PeerMessage {
     ClipboardSync {
         text: String,
     },
+    /// Viewer requests an immediate keyframe resync (sent when video decoder fails)
+    RequestKeyframe,
     /// Remote Ctrl+Alt+Del injection request
     SendCtrlAltDel,
     /// Terminate session gracefully

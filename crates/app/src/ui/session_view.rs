@@ -62,6 +62,13 @@ impl SessionViewState {
 
     /// Updates the remote texture from raw RGBA buffer.
     pub fn update_frame(&mut self, ctx: &egui::Context, rgba_data: &[u8], width: u32, height: u32) {
+        // Safety check: reject malformed frames to avoid panic in ColorImage
+        if width == 0 || height == 0 || rgba_data.len() != (width as usize * height as usize * 4) {
+            tracing::warn!("update_frame: rejected malformed frame {}×{} ({} bytes, expected {})",
+                width, height, rgba_data.len(), width as usize * height as usize * 4);
+            return;
+        }
+
         self.screen_width = width;
         self.screen_height = height;
 

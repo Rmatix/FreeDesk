@@ -196,12 +196,15 @@ async fn run_network_loop(
     let input_simulator = Arc::new(InputSimulator::new());
     let my_id_clone = clean_my_id.clone();
     let is_hosting_flag = is_hosting.clone();
+    // Shared flag: viewer can request an immediate keyframe resync from the host
+    let force_keyframe_flag = Arc::new(AtomicBool::new(false));
 
     // Inbound listener from relay
     let event_tx_clone = event_tx.clone();
     let out_tx_inbound = out_tx.clone();
     let sim_clone = input_simulator.clone();
-    let host_perms_clone = host_perms.clone(); // clone before moving into async block
+    let host_perms_clone = host_perms.clone();
+    let keyframe_flag_inbound = force_keyframe_flag.clone();
 
     tokio::spawn(async move {
         let mut decoder = TileDecoder::new(1280, 720);
@@ -266,15 +269,41 @@ async fn run_network_loop(
                                     }
                                 }
                                 PeerMessage::Video(delta) => {
-                                    if decoder.apply_delta(&delta).is_ok() {
-                                        event_tx_clone
-                                            .send(NetworkEvent::NewFrame {
-                                                width: delta.width,
-                                                height: delta.height,
-                                                rgba: decoder.frame_buffer.clone(),
-                                            })
-                                            .ok();
+                                    if delta.tiles.is_empty() && !delta.is_keyframe {
+                                        // Empty non-keyframe — nothing to apply, skip
+                                        continue;
                                     }
+                                    match decoder.apply_delta(&delta) {
+                                        Ok(()) => {
+                                            event_tx_clone
+                                                .send(NetworkEvent::NewFrame {
+                                                    width: delta.width,
+                                                    height: delta.height,
+                                                    rgba: decoder.frame_buffer.clone(),
+                                                })
+                                                .ok();
+                                        }
+                                        Err(e) => {
+                                            error!("❌ apply_delta failed ({}×{}, {} tiles, keyframe={}): {}",
+                                                delta.width, delta.height, delta.tiles.len(), delta.is_keyframe, e);
+                                            // Reset decoder and ask host for a fresh keyframe
+                                            decoder = TileDecoder::new(delta.width, delta.height);
+                                            // Request immediate keyframe resync from host
+                                            let req = PeerMessage::RequestKeyframe;
+                                            if let Ok(payload) = req.serialize() {
+                                                let fwd = RelayMessage::Forward {
+                                                    target_id: from_id.clone(),
+                                                    from_id: my_id_clone.clone(),
+                                                    payload,
+                                                };
+                                                out_tx_inbound.try_send(fwd).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                                PeerMessage::RequestKeyframe => {
+                                    info!("🔄 Viewer requests keyframe resync — forcing next frame as keyframe");
+                                    keyframe_flag_inbound.store(true, Ordering::SeqCst);
                                 }
                                 PeerMessage::Input(evt) => {
                                     let perms = host_perms_clone.lock().unwrap().clone();
@@ -399,9 +428,10 @@ async fn run_network_loop(
                     let host_out = out_tx.clone();
                     let my_id = clean_my_id.clone();
                     let stats_tx = event_tx.clone();
+                    let kf_flag = force_keyframe_flag.clone();
 
                     thread::spawn(move || {
-                        run_host_capture_loop(flag, target_id, my_id, host_out, stats_tx);
+                        run_host_capture_loop(flag, kf_flag, target_id, my_id, host_out, stats_tx);
                     });
                 }
             }
@@ -567,6 +597,7 @@ async fn run_network_loop(
 ///  • Telemetry stats emitted to UI every second.
 fn run_host_capture_loop(
     running: Arc<AtomicBool>,
+    keyframe_flag: Arc<AtomicBool>,
     target_viewer_id: String,
     my_id: String,
     out_tx: tokio::sync::mpsc::Sender<RelayMessage>,
@@ -593,14 +624,18 @@ fn run_host_capture_loop(
     let mut last_stat_time = std::time::Instant::now();
     let mut frames_in_sec = 0u32;
     let mut bytes_in_sec = 0u32;
+    // Send first frame immediately as keyframe so viewer gets video ASAP
+    let mut next_force_keyframe = true;
 
     while running.load(Ordering::SeqCst) {
         let frame_start = std::time::Instant::now();
 
         match capture.capture_frame(&mut raw_rgba) {
             Ok(()) => {
-                // Keyframe every 120 sent frames (~2 s at 60 FPS)
-                let force_keyframe = frame_count % 120 == 0;
+                // Keyframe every 60 sent frames (~1s at 60 FPS) or when viewer requests resync
+                let viewer_requested = keyframe_flag.swap(false, Ordering::SeqCst);
+                let force_keyframe = next_force_keyframe || viewer_requested || frame_count % 60 == 0;
+                next_force_keyframe = false;
                 let delta = encoder.encode_frame(&raw_rgba, force_keyframe);
                 frame_count += 1;
 
